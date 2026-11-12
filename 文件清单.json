@@ -1,0 +1,225 @@
+{
+  "version": "1112.1",
+  "status": "unpublished working-tree snapshot",
+  "prepared_date_Asia_Shanghai": "2026-11-12",
+  "git_base_commit": "946885ea763bf967205fbd65c9c05b0d610ebb8e",
+  "source_files": 40,
+  "includes_private_runtime_data": false,
+  "files": [
+    {
+      "path": "00-先读我.md",
+      "size": 2139,
+      "sha256": "00f6ce1c1e2965655b2ef1d1e6f3d50fa5d46225ccc87810a90d72b99b884f00"
+    },
+    {
+      "path": "01-需求清单与验收.md",
+      "size": 7541,
+      "sha256": "cca56b7d046f78ce500af75145ad78c6f4170f73e60128f060141dba26d74e2b"
+    },
+    {
+      "path": "02-开发接手说明.md",
+      "size": 5820,
+      "sha256": "650012c6879a651f6262c9a79ce553f5d88d918a01771273cf6602c11ec679a9"
+    },
+    {
+      "path": "source/AI图文识别使用指南.md",
+      "size": 7403,
+      "sha256": "9f93f9a453d5231e99b6ec0197cb1613f8f9c0b73a020ab9d795155fa677f2af"
+    },
+    {
+      "path": "source/README.md",
+      "size": 30759,
+      "sha256": "b0662c2f7c38e688703938da0b3e96fd138b10585bfb144b2124ce2159233994"
+    },
+    {
+      "path": "source/app.py",
+      "size": 27732,
+      "sha256": "1c7cf4e3e7df08e9b2644e9bd77b8fb127aa3e0336172c8aca86871c18363bd0"
+    },
+    {
+      "path": "source/examples/商品叫法归类示例.csv",
+      "size": 108,
+      "sha256": "68e6ed4180122086204e44549daea32a672ac229dae4773a34d153692c68e62c"
+    },
+    {
+      "path": "source/examples/填写资料列示例.csv",
+      "size": 168,
+      "sha256": "d43ec15b2d22de3633d797d0218012e0e08d6b437faf38a1d913b494ebec29a8"
+    },
+    {
+      "path": "source/examples/改价库存资料列示例.csv",
+      "size": 41,
+      "sha256": "0ef25087f22a4bf9394b907332f4d0755e7712574684519971b1cf368968c18f"
+    },
+    {
+      "path": "source/examples/示例库存.csv",
+      "size": 155,
+      "sha256": "29cc07f52edb373a6692f9eb985b70df2869fa65fd776a2fd29c0a45fe68dc1b"
+    },
+    {
+      "path": "source/start_lan.py",
+      "size": 3183,
+      "sha256": "e6dacb105be9cd8c02785fa9b5845ebf203a2da7f09053aca432afb30936ab77"
+    },
+    {
+      "path": "source/template_manager/__init__.py",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "source/template_manager/ai.py",
+      "size": 28035,
+      "sha256": "7b36a11be4f94ccd285491bd20b16f9899b0f880d0fd8103328b7300a320b610"
+    },
+    {
+      "path": "source/template_manager/aliases.py",
+      "size": 11605,
+      "sha256": "4a2a3b66bc02534f2037ee28d6e8f3a7baf6cf284c9696b4043581ed2fbcd8d7"
+    },
+    {
+      "path": "source/template_manager/auth.py",
+      "size": 2750,
+      "sha256": "3e536cbaac0451f27051fdd3c55967fd6451af43dc2f00541348ce7c1d180c67"
+    },
+    {
+      "path": "source/template_manager/batch.py",
+      "size": 13347,
+      "sha256": "8bb73bd5d3e1de1464398cb91d47373aa19e225e9767fda10425932acbd78601"
+    },
+    {
+      "path": "source/template_manager/copywriting.py",
+      "size": 18757,
+      "sha256": "4913b470e17abdfd11be64a8e8b34aacb0581349fd3995d3dc69f41e66a67d89"
+    },
+    {
+      "path": "source/template_manager/filling.py",
+      "size": 44457,
+      "sha256": "72c1ea088752fe5e7b58de005fee124ec37bcdf23f58ec7779e07e567c5aafaa"
+    },
+    {
+      "path": "source/template_manager/inventory.py",
+      "size": 24423,
+      "sha256": "caab92e9719b0cd12944ee38044f94e19876757952332b2c56eb1542af26942a"
+    },
+    {
+      "path": "source/template_manager/library.py",
+      "size": 23622,
+      "sha256": "a740a73c579c0aa04f0124ef1fe0158394036699f2ae81225041667551457ec7"
+    },
+    {
+      "path": "source/template_manager/metadata.py",
+      "size": 5397,
+      "sha256": "9023cceeec71357e107e9a8dab299f3fa4864df2a7c34b5cda4594c0fdaafba9"
+    },
+    {
+      "path": "source/template_manager/product_types.py",
+      "size": 4165,
+      "sha256": "b56983fb6618dc738a5dd93b929da0c6dbc0abeded52cdc4ff69e0fc367882c9"
+    },
+    {
+      "path": "source/template_manager/roster.py",
+      "size": 11553,
+      "sha256": "ad1fd60a1d4621ec7be39c8a004749dac4fe782041ab98ed8d6244bd00312813"
+    },
+    {
+      "path": "source/tests/test_ai.py",
+      "size": 17689,
+      "sha256": "c8409252893354d665bf2de630165cf1a81b0a5e7cd8a78a154eccba35a5e3d7"
+    },
+    {
+      "path": "source/tests/test_aliases.py",
+      "size": 14157,
+      "sha256": "d2ad427b370766f772557a6c24ea7b1de26d18f0dda0c069afb20e7da054c5a4"
+    },
+    {
+      "path": "source/tests/test_app.py",
+      "size": 17200,
+      "sha256": "1ab320d185df892a7b2a8bb04bfc24e3aa2a07af227daeb4e7d11c9a5b89187a"
+    },
+    {
+      "path": "source/tests/test_batch.py",
+      "size": 9102,
+      "sha256": "15f46eb4f22d5b8478ab724a44bd7201c5f7731f9caf1fee490f99ec00a9e4ba"
+    },
+    {
+      "path": "source/tests/test_batch_versions.py",
+      "size": 7395,
+      "sha256": "c088f93aef28145db21573221e54fde452b7dc43e7dc1ba402573926356afcc4"
+    },
+    {
+      "path": "source/tests/test_copywriting.py",
+      "size": 16430,
+      "sha256": "88e7720a2dfb2d7773f2e4c286213b1435d6a68a24fab2e2dbeb511b1d42514e"
+    },
+    {
+      "path": "source/tests/test_delete.py",
+      "size": 3993,
+      "sha256": "89c7bc45ad9638139e0812f091de30f085718135a285cc05f149541d0358ee2f"
+    },
+    {
+      "path": "source/tests/test_download.py",
+      "size": 2466,
+      "sha256": "b75e710b2eb80fbab34bf26723d274052036ddf97a5a578645f71e58e9a205af"
+    },
+    {
+      "path": "source/tests/test_filling.py",
+      "size": 17488,
+      "sha256": "19763920dc5e387112f499104de43522eff666132784fbb7ba6387e952d9f754"
+    },
+    {
+      "path": "source/tests/test_inventory.py",
+      "size": 9256,
+      "sha256": "59aae772f4c0024197172310a9aa9b8779bb3d31378f659a8fd13aac1172e58a"
+    },
+    {
+      "path": "source/tests/test_metadata.py",
+      "size": 3749,
+      "sha256": "d6ce8c7c046e0b4589d94e5bd6c4aa514d8ddde5753eaaf441accad354243131"
+    },
+    {
+      "path": "source/tests/test_multi_product_types.py",
+      "size": 10375,
+      "sha256": "9b370c42ae3161799622f2ce3a88f5f30f4a66810c5f4156257a7f4f70ef9985"
+    },
+    {
+      "path": "source/tests/test_roster.py",
+      "size": 7929,
+      "sha256": "47a7c0fa73118594a43df3c4da6061cd1247a3a14485bec2a09ed639cccd1e17"
+    },
+    {
+      "path": "source/tests/test_shops.py",
+      "size": 4596,
+      "sha256": "43775277a0e141a2542d16cf2062bef68d5535b0e4276eb7b2824efbc648ae54"
+    },
+    {
+      "path": "source/tests/test_table_types.py",
+      "size": 12486,
+      "sha256": "222de2b3df099d9c9c50691945240e49083009cddce54c83d88a7a0b82be49d9"
+    },
+    {
+      "path": "source/web/app.js",
+      "size": 111749,
+      "sha256": "267ad8cdc24d307a5b385e0c4abe9e1648f3305cdc304025eecf41bf1eadbc08"
+    },
+    {
+      "path": "source/web/index.html",
+      "size": 34535,
+      "sha256": "0665163eae84e8b0ba443de64dd594d5b51fa12d1a70a6e795b80f7cb610fb21"
+    },
+    {
+      "path": "source/web/style.css",
+      "size": 35913,
+      "sha256": "4b5206aa904b0b82563cdb3ea33f1a0724eb2a6835f7e44c80c6fa48e13148f2"
+    },
+    {
+      "path": "source/公司局域网使用指南.md",
+      "size": 8622,
+      "sha256": "c1db0598a26459aaef492e47e2a0ce36dfbb976a7faab499dae100f135b92a06"
+    },
+    {
+      "path": "source/源码版启动说明.md",
+      "size": 1170,
+      "sha256": "2da2e241e84534d5fa999207afdb772962a2368a8ee0eda7b7599baa41e2ff80"
+    }
+  ]
+}

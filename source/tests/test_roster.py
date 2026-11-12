@@ -1,0 +1,130 @@
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+
+from template_manager import roster, library
+from test_metadata import account_book
+
+
+TABLE = '| 店铺 | 卖家记号阿联酋 | 卖家记号沙特 |\n| --- | --- | --- |\n| 测试甲<br> | ATEST001 | ATEST002 |\n| 测试乙 | ATEST003 | ATEST003 |\n'
+
+
+class RosterTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)/'library'
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_markdown_and_different_market_ids(self):
+        result = roster.import_text(self.root, TABLE)
+        self.assertEqual(result['shops'], 2)
+        self.assertEqual(result['site_records'], 4)
+        self.assertEqual(result['account_sources'], 3)
+        self.assertEqual(roster.directory(self.root), ['测试乙', '测试甲', '通用模板'])
+        recognized = library.inspect_template(self.root, account_book(account='ATEST001'), '.xlsm')
+        self.assertEqual(recognized['recognized_shop'], '测试甲')
+
+    def test_excel_clipboard_and_csv(self):
+        for text in ['店铺\t卖家记号阿联酋\t卖家记号沙特\n测试甲\tATEST001\tATEST002', '店铺,AE,SA\n测试甲,ATEST001,ATEST002']:
+            self.assertEqual(len(roster.parse(text)), 2)
+
+    def test_spaces_and_wrapped_store_name(self):
+        text='店铺    卖家记号阿联酋    卖家记号沙特\nDemo AE    ATEST001    ATEST002\nlong_store_name\n    ATEST003    ATEST003\n'
+        records=roster.parse(text)
+        self.assertEqual(len(records),4)
+        self.assertEqual({r['shop'] for r in records},{'Demo AE','long_store_name'})
+
+    def test_headerless_three_columns_in_supported_clipboard_formats(self):
+        for text in [
+            'Demo AE    ATEST001    ATEST002',
+            'Demo AE\tATEST001\tATEST002',
+            '"Demo AE",ATEST001,ATEST002',
+            'Demo AE;ATEST001;ATEST002',
+            '| Demo AE | ATEST001 | ATEST002 |',
+            '\ufeffDemo AE\u3000ATEST001\u00a0ATEST002',
+        ]:
+            with self.subTest(text=text):
+                records=roster.parse(text)
+                self.assertEqual([(r['shop'],r['marketplace'],r['seller_id']) for r in records],[('Demo AE','AE','ATEST001'),('Demo AE','SA','ATEST002')])
+        rows=roster.parse('Demo AE  ATEST001  ATEST002\nDemo-SA  ATEST003  ATEST004')
+        self.assertEqual(len(rows),4)
+        # A shop may itself be named like a header when both IDs are explicit.
+        self.assertEqual(roster.parse('AE\tATEST001\tATEST002')[0]['shop'],'AE')
+
+    def test_headerless_wrapped_cells_and_incomplete_rows(self):
+        records=roster.parse('Long Store Name\nATEST001\nATEST002\nSecond Store\nATEST003 ATEST004')
+        self.assertEqual({r['shop'] for r in records},{'Long Store Name','Second Store'})
+        for text in ['甲店 ATEST001\n乙店 ATEST002 ATEST003','甲店\n乙店 ATEST002 ATEST003','甲店 ATEST001 ATEST002\n乙店 ATEST003','甲店 ATEST001 ATEST002 EXTRA']:
+            with self.subTest(text=text),self.assertRaises(ValueError):roster.parse(text)
+
+    def test_headerless_missing_regions_are_explicit_and_validated(self):
+        for text in ['甲店\t\tATEST002','甲店,,ATEST002','甲店  -  ATEST002','甲店  ATEST001  —']:
+            with self.subTest(text=text):self.assertEqual(len(roster.parse(text)),1)
+        with self.assertRaisesRegex(ValueError,'第 2 行 SA'):
+            roster.parse('甲店,ATEST001,ATEST002\n乙店,ATEST003,wrong')
+        with self.assertRaisesRegex(ValueError,'至少一个地区'):roster.parse('甲店,,')
+        with self.assertRaisesRegex(ValueError,'至少.*一行'):roster.parse('店铺,AE,SA')
+        # Explicit headers can reorder regions; a headerless table has a fixed order.
+        rows=roster.parse('SA,店铺,AE\nATEST002,甲店,ATEST001')
+        self.assertEqual([(r['marketplace'],r['seller_id']) for r in rows],[('AE','ATEST001'),('SA','ATEST002')])
+
+    def test_headerless_import_validation_and_conflicts_leave_directory_unchanged(self):
+        roster.import_text(self.root,'原店 ATEST001 ATEST002');before=roster.editable_directory(self.root)
+        for text in ['新店 ATEST003 ATEST004\n错误店 ATEST005','新店,ATEST003,ATEST004\n错误店,wrong,ATEST005','新店 ATEST003 ATEST004\n错误店 ATEST001 ATEST006']:
+            with self.subTest(text=text),self.assertRaises(ValueError):roster.import_text(self.root,text)
+            self.assertEqual(roster.editable_directory(self.root),before)
+
+    def test_editor_without_header_and_region_specific_errors(self):
+        result=roster.import_rows(self.root,[{'shop':'新店','ae':'ATEST001','sa':''}])
+        self.assertEqual(result['site_records'],1)
+        with self.assertRaisesRegex(ValueError,'第 1 行沙特'):
+            roster.import_rows(self.root,[{'shop':'新店','ae':'ATEST001','sa':'wrong'}])
+
+    def test_incomplete_wrapped_row_is_not_guessed(self):
+        with self.assertRaisesRegex(ValueError,'缺少两个|含义不明确'):
+            roster.parse('店铺 卖家记号阿联酋 卖家记号沙特\n甲店 ATEST001\n乙店 ATEST002 ATEST003')
+
+    def test_upload_template_learns_seller_without_manual_import(self):
+        source=Path(self.tmp.name)/'source.xlsm';source.write_bytes(account_book(account='ATEST001'))
+        library.run(SimpleNamespace(command='add',library=str(self.root),source=str(source),shop='新店',marketplace='AE',category='行李箱',version='v1'))
+        targets=roster.targets(self.root,'AE')
+        self.assertEqual(len(targets),1);self.assertTrue(targets[0]['can_generate'])
+        self.assertEqual(roster.editable_directory(self.root),[{'shop':'新店','ae':'ATEST001','sa':''}])
+
+    def test_unknown_account_remains_unknown(self):
+        roster.import_text(self.root, TABLE)
+        self.assertIsNone(library.inspect_template(self.root, account_book(account='ATEST999'), '.xlsm')['recognized_shop'])
+
+    def test_invalid_or_conflicting_table_no_partial_import(self):
+        roster.import_text(self.root, TABLE)
+        with self.assertRaisesRegex(ValueError, '已绑定'):
+            roster.import_text(self.root, '店铺,AE,SA\n新店,ATEST004,ATEST004\n错误店,ATEST001,ATEST001')
+        self.assertNotIn('新店', roster.directory(self.root))
+        with self.assertRaisesRegex(ValueError, '对应不同店铺'):
+            roster.parse('店铺,AE,SA\n甲店,ATEST001,ATEST001\n乙店,ATEST001,ATEST002')
+
+    def test_registry_primary_marketplace_must_match(self):
+        roster.import_text(self.root, TABLE)
+        file = Path(self.tmp.name)/'template.xlsm'
+        file.write_bytes(account_book(account='ATEST002'))  # This ID registered for SA, template declares AE.
+        with self.assertRaisesRegex(ValueError, '该站点'):
+            library.run(SimpleNamespace(command='add', library=str(self.root), source=str(file), marketplace='AE', category='行李箱', version='v1', shop='测试甲'))
+
+    def test_directory_only_backup_restores_without_template_uploads(self):
+        roster.import_text(self.root, TABLE)
+        backup = Path(self.tmp.name)/'backup.zip'
+        library.run(SimpleNamespace(command='backup', library=str(self.root), output=str(backup)))
+        restored = Path(self.tmp.name)/'restored'
+        library.run(SimpleNamespace(command='restore', library=str(restored), source=str(backup)))
+        self.assertEqual(roster.directory(restored), roster.directory(self.root))
+        self.assertEqual(library.inspect_template(restored, account_book(account='ATEST003'), '.xlsm')['recognized_shop'], '测试乙')
+        db = (restored/'index.sqlite3').read_bytes()
+        self.assertIn(b'ATEST003', db)  # Private raw IDs are required to generate other shops' copies.
+        self.assertTrue(all(t['can_generate'] for t in roster.targets(restored,'AE')))
+
+
+if __name__ == '__main__':
+    unittest.main()
