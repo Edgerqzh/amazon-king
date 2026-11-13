@@ -25,6 +25,7 @@ from template_manager import ai
 from template_manager import roster
 from template_manager import batch
 from template_manager import processing
+from template_manager import spapi, listings, operations, vault
 from template_manager.locks import LibraryLock
 
 WEB = Path(__file__).parent / 'web'
@@ -192,6 +193,9 @@ class Handler(BaseHTTPRequestHandler):
             if path.path == '/api/ai/settings':
                 self.send(self.server.ai.public())
                 return
+            if path.path == '/api/amazon/status':
+                self.send(self.server.spapi.public())
+                return
             if path.path == '/api/shops/roster' and user['role'] != 'admin':
                 self.send({'error': '当前账号没有此操作权限'}, 403)
                 return
@@ -230,6 +234,50 @@ class Handler(BaseHTTPRequestHandler):
                 return ({'error': '模板不存在'}, 404), {}
             return (library.verified(self.root, row),), {'mime': 'application/octet-stream', 'filename': library.download_filename(row)}
         return ({'error': '页面不存在'}, 404), {}
+
+    def amazon(self, body, user):
+        """Store operations for admins and editors. Only change/submit alters the live store."""
+        client, name = self.server.spapi, user['username']
+        market = body.get('marketplace', '')
+        route = self.path[len('/api/amazon/'):]
+        if route == 'overview':
+            self.send(operations.overview(client, market))
+        elif route == 'orders':
+            self.send(operations.orders(client, market, body.get('days', 7), body.get('status', '')))
+        elif route == 'order-items':
+            self.send(operations.order_items(client, body.get('id')))
+        elif route == 'sales':
+            self.send(operations.sales(client, market, body.get('days', 14)))
+        elif route == 'fba-inventory':
+            self.send(operations.fba_inventory(client, market, body.get('skus') or None))
+        elif route == 'report/create':
+            self.send(self.server.spapi_reports.create(client, body.get('kind'), market, body.get('days', 7)))
+        elif route == 'report':
+            self.send(self.server.spapi_reports.get(client, body.get('id')))
+        elif route == 'report/download':
+            data, filename = self.server.spapi_reports.download(body.get('id'))
+            self.send(data, mime='text/csv; charset=utf-8', filename=filename)
+        elif route == 'template-check':
+            with self.server.library_lock.shared():
+                target = next((row for row in self.call('list', marketplace=None, category=None) if row['id'] == body.get('template_id')), None)
+                if target is None:raise ValueError('所选模板不存在，请刷新模板列表')
+                template_data = library.verified(self.root, target)
+            book = filling.Workbook(template_data)
+            try:info = filling.template_info(book, target['marketplace'], target['table_type'])
+            finally:book.close()
+            result = operations.template_check(client, self.server.spapi_definitions, info['fields'], info['product_types'], target['marketplace'])
+            result['template'] = {key:target[key] for key in ('id','shop','marketplace','table_type','category','version')}
+            result['generated_at'] = (target.get('metadata') or {}).get('generated_at', '')
+            self.send(result)
+        elif route == 'change/preview':
+            self.send(self.server.spapi_changes.preview(client, name, market, body.get('items')))
+        elif route in ('change/submit', 'listing/submit'):
+            self.send(self.server.spapi_changes.submit(client, name, body.get('token'), body.get('sku'), body.get('confirmed'), overwrite=body.get('overwrite') is True))
+        elif route == 'change/log':
+            self.send(self.server.spapi_changes.recent())
+        else:
+            return False
+        return True
 
     def do_POST(self):
         if not self.trusted(pending=self.body_size()):
@@ -271,8 +319,8 @@ class Handler(BaseHTTPRequestHandler):
                 suffix = '; Secure' if self.server.scheme == 'https' else ''
                 self.send({'ok': True}, cookie=f'session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200' + suffix)
                 return
-            roles = ('admin',) if self.path in ('/api/users', '/api/restore', '/api/ai/settings', '/api/ai/test', '/api/shops/import', '/api/shops/preview') else ('admin', 'editor')
-            if self.path in ('/api/logout', '/api/inventory/inspect', '/api/inventory/analyze', '/api/templates/download', '/api/processing-report'):
+            roles = ('admin',) if self.path in ('/api/users', '/api/restore', '/api/ai/settings', '/api/ai/test', '/api/amazon/test', '/api/amazon/credentials', '/api/amazon/credentials/delete', '/api/shops/import', '/api/shops/preview') else ('admin', 'editor')
+            if self.path in ('/api/logout', '/api/inventory/inspect', '/api/inventory/analyze', '/api/templates/download', '/api/processing-report', '/api/amazon/listings'):
                 roles = None
             current_user = self.identity(roles, pending=size)
             if not current_user:
@@ -299,6 +347,27 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/api/ai/test':
                 self.send(ai.probe(self.server.ai))
+                return
+            if self.path in ('/api/amazon/credentials', '/api/amazon/credentials/delete'):
+                # Secrets are typed only on the server computer itself, never over plain HTTP from another machine.
+                if self.server.scheme != 'https' and self.client_address[0] not in ('127.0.0.1', '::1'):
+                    self.send({'error': '只能在运行本软件的电脑上保存或清除凭证，请在那台电脑上用 127.0.0.1 打开软件'}, 403)
+                    return
+                if self.path.endswith('/delete'):self.server.spapi.forget()
+                else:self.server.spapi.save(body)
+                self.send(self.server.spapi.public())
+                return
+            if self.path == '/api/amazon/test':
+                # Read-only: lists the marketplaces this seller account sells in.
+                self.send({'marketplaces': spapi.participations(self.server.spapi), **self.server.spapi.public()})
+                return
+            if self.path == '/api/amazon/listings':
+                # Read-only lookup of existing SKUs.
+                self.send(listings.status(self.server.spapi, body.get('skus'), body.get('marketplace', '')))
+                return
+            if self.path.startswith('/api/amazon/'):
+                if not self.amazon(body, current_user):
+                    self.send({'error': '接口不存在'}, 404)
                 return
             lock = self.server.library_lock
             if self.path == '/api/template-shop':
@@ -367,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
                 with lock.shared():result = {**aliases.preview(self.root, rows), **info}
                 self.send(result)
                 return
-            if self.path in ('/api/fill/preview', '/api/fill/export', '/api/fill/generate'):
+            if self.path in ('/api/fill/preview', '/api/fill/export', '/api/fill/generate', '/api/fill/precheck'):
                 with lock.shared():
                     templates = self.call('list', marketplace=None, category=None)
                     target = next((row for row in templates if row['id'] == body.get('template_id')), None)
@@ -408,6 +477,37 @@ class Handler(BaseHTTPRequestHandler):
                         if job is not None:progress.update(user,job,{'stage':'error'})
                         raise
                     finally:self.server.ai_job_lock.release()
+                    return
+                if self.path == '/api/fill/precheck':
+                    # Validation only (mode=VALIDATION_PREVIEW): Amazon checks the rows and saves nothing.
+                    if body.get('precheck_consent') is not True:raise ValueError('请先确认将所选 SKU 的填写内容发送到亚马逊做预检')
+                    self.server.spapi.require()
+                    if not self.server.spapi_job_lock.acquire(blocking=False):
+                        self.send({'error':'另一个亚马逊预检正在进行，请稍后重试'},409)
+                        return
+                    user, job = current_user['username'], body.get('job_id')
+                    progress = self.server.inventory_progress
+                    try:
+                        if job is not None:progress.start(user,job)
+                        if not self.server.fill_job_lock.acquire(blocking=False):raise ValueError('另一个填写任务正在读取资料，请稍后重试')
+                        try:
+                            book, tpl, report, rows = filling.prepare(template_data, data, name, target['marketplace'], target['table_type'], **options)
+                            book.close()
+                        finally:self.server.fill_job_lock.release()
+                        fields = [{key:f[key] for key in ('key','label','column','canonical')} for f in tpl['fields'] if f['active']]
+                        def update_precheck(state):
+                            if job is not None:progress.update(user,job,state)
+                        result = listings.precheck(self.server.spapi, self.server.spapi_definitions, rows, fields, target['marketplace'], target['table_type'], start=body.get('precheck_start',1), limit=body.get('precheck_limit',20), progress=update_precheck, hold=lambda sku, path, query, payload: self.server.spapi_changes.hold_listing(user, target['marketplace'], sku, path, query, payload))
+                        result['template'] = {key:target[key] for key in ('id','shop','marketplace','table_type','category','version')}
+                        seller = self.server.spapi.seller_id()
+                        if target.get('metadata',{}).get('account_fingerprint') and target['metadata']['account_fingerprint'] != roster.fingerprint(seller):
+                            result['notes'].insert(0,'注意：这份模板里的卖家记号与接口凭证的卖家编号不一致。如果它是其他店铺的模板，本次预检结果不适用于那个店铺')
+                        result['local_errors'] = report['errors']
+                        self.send(result)
+                    except Exception:
+                        if job is not None:progress.update(user,job,{'stage':'error'})
+                        raise
+                    finally:self.server.spapi_job_lock.release()
                     return
                 if not self.server.fill_job_lock.acquire(blocking=False):
                     self.send({'error':'另一个填写任务正在处理，请稍后重试'},409)
@@ -535,6 +635,11 @@ def create_server(data_dir, port=8765, host='127.0.0.1', allowed_hosts=None, sch
     server = ThreadingHTTPServer((host, port), partial(Handler, data_dir=data_dir))
     server.auth = Auth(data_dir.parent / 'accounts.sqlite3')
     server.ai = ai.Settings(data_dir.parent / 'ai-config.json')
+    server.spapi = spapi.Client(vault=vault.default())
+    server.spapi_definitions = listings.Definitions()
+    server.spapi_job_lock = threading.Lock()
+    server.spapi_reports = operations.Reports()
+    server.spapi_changes = operations.Changes(data_dir.parent / 'amazon-changes.jsonl')
     server.library_lock = LibraryLock()
     server.ai_job_lock = threading.Lock()
     server.fill_job_lock = threading.Lock()
@@ -566,7 +671,7 @@ if __name__ == '__main__':
     if a.host != '127.0.0.1' and not a.allowed_host:
         p.error('对外监听必须通过 --allowed-host 显式指定访问地址')
     server = create_server(Path(a.data_dir).resolve(), a.port, a.host, a.allowed_host, 'https' if a.https else 'http')
-    print(f'亚马逊模板管理已启动：http://127.0.0.1:{server.server_port}', flush=True)
+    print(f'无敌亚马逊大王已启动：http://127.0.0.1:{server.server_port}', flush=True)
     print(f'模板保存位置：{Path(a.data_dir).resolve()}', flush=True)
     try:
         server.serve_forever()

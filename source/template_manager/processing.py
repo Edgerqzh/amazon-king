@@ -437,6 +437,11 @@ def parse(data, filename, fields=None):
         summary = read_book(bytes(data), collector) if is_book else read_text(bytes(data), collector)
     except zipfile.BadZipFile:
         raise ValueError('处理报告文件已损坏，请重新从卖家后台下载') from None
+    return summarise(collector, 'excel' if is_book else 'text', filename, summary)
+
+
+def summarise(collector, kind, filename, summary):
+    """Counts and groups for a set of collected issues (a report file or an API pre-check)."""
     issues = collector.issues
     counts = {level: sum(i['severity'] == level for i in issues) for level in SEVERITIES}
     groups = {}
@@ -448,7 +453,7 @@ def parse(data, filename, fields=None):
                 group[key].append(value)
     order = {level: i for i, level in enumerate(SEVERITIES)}
     return {
-        'format': 'excel' if is_book else 'text', 'filename': filename, 'summary': summary, 'counts': counts,
+        'format': kind, 'filename': filename, 'summary': summary, 'counts': counts,
         'skus': len({i['sku'] for i in issues if i['sku']}), 'error_skus': len({i['sku'] for i in issues if i['sku'] and i['severity'] == 'error'}),
         'matched_fields': sum(bool(i['field_key']) for i in issues), 'issues': issues, 'truncated': collector.truncated,
         'groups': sorted(groups.values(), key=lambda g: (order[g['severity']], -g['count'])),

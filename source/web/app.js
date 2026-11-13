@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const UI_REVISION='英文文案版 1112.1';
+const UI_REVISION='亚马逊接口版 1113';
 const TABLE_TYPES={upload:'上传表格',price_update:'改价表格'};
 ensureInventoryShopPicker();
 let templates = [];
@@ -15,6 +15,10 @@ const PAGES={
   library:{id:'library',title:'模板库',description:'查找和下载团队保存的模板，按店铺、地区与类目筛选。',roles:['admin','editor','viewer']},
   fill:{id:'fill-panel',title:'填写表格',description:'把产品资料填写到原始模板，支持新商品与价格／库存更新。',roles:['admin','editor']},
   report:{id:'report-panel',title:'处理报告',description:'导入亚马逊返回的处理报告，按 SKU 和字段看懂每条问题。',roles:['admin','editor','viewer']},
+  amazon:{id:'amazon-panel',title:'亚马逊接口',description:'查询店铺里现有 SKU 的状态和问题；只读，不修改店铺。',roles:['admin','editor','viewer']},
+  ops:{id:'ops-panel',title:'调价与库存',description:'修改售价和自配送库存：先预检，逐条确认后才提交到店铺。',roles:['admin','editor']},
+  orders:{id:'orders-panel',title:'订单',description:'查看最近订单和待发货情况；只读，不含买家信息。',roles:['admin','editor']},
+  sales:{id:'sales-panel',title:'销售与报告',description:'每日销售汇总，以及亚马逊生成的商品、库存和订单报告。',roles:['admin','editor']},
   import:{id:'import',title:'上传模板',description:'保存原始模板，自动读取来源，只需确认店铺名称。',roles:['admin','editor']},
   batch:{id:'batch-panel',title:'同地区批量生成',description:'为同地区店铺生成模板，可选择保存入库或下载 ZIP。',roles:['admin','editor']},
   inventory:{id:'inventory',title:'库存识别',description:'识别商品类型，直接获取对应类别表格。',roles:['admin','editor','viewer']},
@@ -24,25 +28,44 @@ const PAGES={
   members:{id:'admin-panel',title:'成员管理',description:'添加团队成员，分配管理员、编辑者和只读权限。',roles:['admin']},
   backup:{id:'backup-panel',title:'备份恢复',description:'备份模板和店铺目录，或将备份恢复到空模板库。',roles:['admin','editor','viewer']}
 };
+Object.assign(PAGES,{
+  home:{id:'home-panel',title:'总览',description:'',roles:['admin','editor','viewer']},
+  connection:{id:'connection-panel',title:'设置',description:'',roles:['admin','editor','viewer']},
+  check:{id:'check-panel',title:'模板库',description:'',roles:['admin','editor']}
+});
+// Fewer, plainer page titles; several pages share one menu entry and switch with the tabs under the title.
+for(const [key,title,description] of [['library','模板库','团队保存的亚马逊原始模板。'],['import','模板库','保存新的原始模板。'],['batch','模板库','为同地区的其他店铺生成模板。'],['aliases','模板库','把不同叫法归到模板使用的标准类别。'],['check','模板库','对照亚马逊当前的字段要求。'],['inventory','库存识别','识别商品类别，拿到对应的表格。'],['fill','填写表格','把产品资料填进模板，预检后上架。'],['report','处理报告','看懂亚马逊返回的每条问题。'],['amazon','商品查询','查看店铺里商品的状态和问题。'],['ops','调价与库存','改售价和自配送库存，逐条确认后提交。'],['orders','订单','最近的订单和待发货情况。'],['sales','销售与报告','每日销售，以及可下载的报告。'],['connection','设置','与亚马逊店铺的连接。'],['shops','设置','店铺和各地区的卖家记号。'],['ai','设置','AI 服务商、模型与密钥。'],['members','设置','团队成员和权限。'],['backup','设置','备份和恢复模板库。'],['home','总览','']]){PAGES[key].title=title;PAGES[key].description=description;}
+const GROUPS={templates:['library','import','batch','aliases','check'],settings:['connection','shops','ai','members','backup']};
+const SUB_LABELS={library:'全部模板',import:'上传模板',batch:'批量生成',aliases:'叫法归类',check:'与亚马逊对照',connection:'亚马逊连接',shops:'店铺',ai:'AI',members:'成员',backup:'备份'};
+const STORE_PAGES=['home','amazon','ops','orders','sales'];
+function renderSubnav(key){
+  const pages=Object.values(GROUPS).find(group=>group.includes(key)),box=$('subnav');
+  const open=pages?pages.filter(page=>PAGES[page].roles.includes(currentRole)):[];box.hidden=open.length<2;
+  box.replaceChildren(...open.map(page=>{const link=document.createElement('a');link.href='#'+page;link.textContent=SUB_LABELS[page];if(page===key)link.setAttribute('aria-current','page');return link;}));
+}
 function showPage(raw=location.hash.slice(1)){
   const alias=Object.keys(PAGES).find(key=>PAGES[key].id===raw);
-  const requested=Object.prototype.hasOwnProperty.call(PAGES,raw)?raw:alias||'library';
-  const key=PAGES[requested].roles.includes(currentRole)?requested:'library';
+  const requested=Object.prototype.hasOwnProperty.call(PAGES,raw)?raw:alias||'home';
+  const key=PAGES[requested].roles.includes(currentRole)?requested:'home';
   for(const [name,page] of Object.entries(PAGES))$(page.id).hidden=name!==key;
   for(const link of document.querySelectorAll('nav [data-route]')){
-    const allowed=PAGES[link.dataset.route].roles.includes(currentRole);link.hidden=!allowed;
-    link.classList.toggle('active',link.dataset.route===key);
-    if(link.dataset.route===key)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');
+    const pages=link.dataset.group?GROUPS[link.dataset.group]:[link.dataset.route],open=pages.filter(page=>PAGES[page].roles.includes(currentRole)),current=pages.includes(key);
+    link.hidden=!open.length;if(link.dataset.group&&open.length)link.setAttribute('href','#'+open[0]);
+    link.classList.toggle('active',current);
+    if(current)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');
   }
   $('library-stats').hidden=key!=='library';
   document.querySelector('.heading h1').textContent=PAGES[key].title;
   document.querySelector('.heading p').textContent=PAGES[key].description;
-  $('breadcrumb').textContent='工作空间 / '+PAGES[key].title;
-  $('workspace').dataset.page=key;document.title=PAGES[key].title+' · 模板仓';
+  $('breadcrumb').textContent='';renderSubnav(key);{const mark=document.querySelector('aside nav a.active svg');$('page-icon').replaceChildren(...(mark?[mark.cloneNode(true)]:[]));}document.querySelector('.heading p').hidden=!PAGES[key].description;
+  $('workspace').dataset.page=key;document.title=PAGES[key].title+' · 无敌亚马逊大王';$('global-market').hidden=!STORE_PAGES.includes(key);
   if(key!==shownPage){replayClass(document.querySelector('.heading'),'enter');if(key==='library')replayRows();shownPage=key;}
   moveNavIndicator();
   if(key==='fill')updateFillActions();
   if(key==='report'){updateReportTemplates();if(reportData)renderReport();}
+  if(['amazon','connection','check'].includes(key))showAmazon();
+  enterPage(key);
+  if(key==='ops')loadOpsLog();
   if(raw!==key)history.replaceState(null,'','#'+key);
 }
 window.addEventListener('hashchange',()=>{if(!$('workspace').hidden){showPage();window.scrollTo({top:0,behavior:'instant'});}});
@@ -63,6 +86,79 @@ function moveNavIndicator(){
   if(nav.scrollWidth>nav.clientWidth+1)nav.scrollTo({left:Math.max(0,active.offsetLeft-(nav.clientWidth-active.offsetWidth)/2),behavior:reducedMotion()?'auto':'smooth'});
 }
 window.addEventListener('resize',()=>{cancelAnimationFrame(navFrame);navFrame=requestAnimationFrame(moveNavIndicator);});
+
+// Sliding pill behind the chosen button of a two-to-five way toggle. It follows aria-pressed / aria-checked /
+// .active-market wherever they are changed, glides on a change and jumps on resize or when a hidden panel opens.
+const SLIDE_ACTIVE='[aria-checked="true"],[aria-pressed="true"],.active-market';
+function slideThumb(group){
+  if(group.slider)return group.slider;
+  const thumb=document.createElement('span');thumb.className='switch-thumb';thumb.setAttribute('aria-hidden','true');group.prepend(thumb);group.classList.add('has-thumb');
+  let shown=false,frame=0;
+  const place=animate=>{
+    const active=group.querySelector(SLIDE_ACTIVE);
+    if(!active||!group.offsetWidth){shown=false;thumb.classList.remove('on');return;}
+    const instant=!animate||!shown||reducedMotion();if(instant)group.classList.add('thumb-instant');
+    thumb.style.width=active.offsetWidth+'px';thumb.style.height=active.offsetHeight+'px';thumb.style.transform='translate('+active.offsetLeft+'px,'+active.offsetTop+'px)';
+    if(!thumb.classList.contains('on'))thumb.classList.add('on');shown=true;
+    if(instant){void thumb.offsetWidth;group.classList.remove('thumb-instant');}
+  };
+  // Changes to the thumb itself or to the group's own classes never move the pill, so they are ignored (no feedback loop).
+  new MutationObserver(records=>{
+    if(records.every(r=>r.target===thumb||(r.target===group&&r.type==='attributes')))return;
+    cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>place(true));
+  }).observe(group,{subtree:true,childList:true,attributes:true,attributeFilter:['aria-pressed','aria-checked','class','hidden']});
+  new ResizeObserver(()=>place(false)).observe(group);
+  place(false);
+  return group.slider={thumb,place};
+}
+
+// Short choice lists (2–3 options) show as a switch instead of a dropdown. The native <select> stays in the page,
+// hidden, as the single source of truth: code that reads or sets .value / .disabled and listens for "change" works unchanged.
+const NATIVE_SELECT=Object.getOwnPropertyDescriptors(HTMLSelectElement.prototype);
+function selectSwitch(select,{compact=false}={}){
+  if(!select||select.switchControl)return select?.switchControl;
+  const box=document.createElement('span');box.className='switch'+(compact?' compact':'');box.setAttribute('role','radiogroup');
+  const name=select.getAttribute('aria-label')||[...(select.closest('label')?.childNodes||[])].filter(node=>node.nodeType===3).map(node=>node.textContent).join('').trim();
+  if(name)box.setAttribute('aria-label',name);if(select.title)box.title=select.title;
+  const hint=document.createElement('small');hint.className='switch-hint';hint.setAttribute('aria-live','polite');
+  let buttons=[];
+  const index=()=>NATIVE_SELECT.selectedIndex.get.call(select);
+  const sync=()=>{
+    const current=index(),off=NATIVE_SELECT.disabled.get.call(select);
+    buttons.forEach((button,i)=>{button.setAttribute('aria-checked',String(i===current));button.tabIndex=i===Math.max(current,0)?0:-1;button.disabled=off||!!select.options[i]?.disabled;});
+    box.classList.toggle('is-disabled',off);
+    const text=select.options[current]?.dataset.hint||'';hint.textContent=text;hint.hidden=!text;
+  };
+  const choose=(i,focus)=>{
+    if(!buttons[i]||buttons[i].disabled)return;
+    if(i!==index()){NATIVE_SELECT.selectedIndex.set.call(select,i);sync();select.dispatchEvent(new Event('input',{bubbles:true}));select.dispatchEvent(new Event('change',{bubbles:true}));}
+    if(focus)buttons[i].focus();
+  };
+  const build=()=>{
+    buttons=[...select.options].map((option,i)=>{
+      const button=document.createElement('button');button.type='button';button.setAttribute('role','radio');button.textContent=option.dataset.short||option.text;
+      if(option.dataset.short)button.title=option.text;button.addEventListener('click',()=>choose(i,false));return button;
+    });
+    box.replaceChildren(...(box.slider?[box.slider.thumb]:[]),...buttons);sync();
+  };
+  box.addEventListener('keydown',event=>{
+    const step={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[event.key];
+    if(!step&&event.key!=='Home'&&event.key!=='End')return;event.preventDefault();
+    const usable=buttons.map((b,i)=>b.disabled?-1:i).filter(i=>i>=0);if(!usable.length)return;
+    const at=usable.indexOf(buttons.indexOf(document.activeElement));
+    const next=event.key==='Home'?usable[0]:event.key==='End'?usable[usable.length-1]:usable[((at<0?0:at)+step+usable.length)%usable.length];
+    choose(next,true);
+  });
+  for(const key of ['value','selectedIndex','disabled'])Object.defineProperty(select,key,{configurable:true,get(){return NATIVE_SELECT[key].get.call(this);},set(value){NATIVE_SELECT[key].set.call(this,value);sync();}});
+  new MutationObserver(records=>records.some(r=>r.type==='childList'||r.attributeName==='label')?build():sync()).observe(select,{childList:true,subtree:true,attributes:true,attributeFilter:['disabled','label']});
+  select.form?.addEventListener('reset',()=>setTimeout(sync));
+  select.classList.add('switch-native');select.tabIndex=-1;select.setAttribute('aria-hidden','true');
+  // The hint sits beside the field's label text, so fields side by side keep their controls on one line.
+  select.after(box);
+  if([...select.options].some(option=>option.dataset.hint)){if(select.closest('label')){hint.classList.add('inline');select.before(hint);}else box.after(hint);}
+  build();slideThumb(box);
+  return select.switchControl=box;
+}
 function countTo(element,value){
   const from=Number(element.textContent)||0;cancelAnimationFrame(element.countFrame);
   if(from===value||reducedMotion()){element.textContent=value;return;}
@@ -109,7 +205,7 @@ function render() {
     if(currentRole==='viewer'){typeCell.textContent=TABLE_TYPES[t.table_type||'upload'];}
     else{
       const select=document.createElement('select');select.className='table-type-select';select.title='调整登记类型，Excel 内容保持原样';select.setAttribute('aria-label','表格类型 '+t.original_name);for(const [value,label] of Object.entries(TABLE_TYPES))select.add(new Option(label,value));select.value=t.table_type||'upload';
-      select.addEventListener('change',async()=>{if(busy){select.value=t.table_type||'upload';notify('请等待当前操作完成',true);return;}const value=select.value;busy=true;select.disabled=true;try{await postJSON('/api/template/type',{id:t.id,table_type:value});inventoryAICache={};resetInventory(false);await load();notify('已改为'+TABLE_TYPES[value]);}catch(e){select.value=t.table_type||'upload';notify(e.message,true);}finally{busy=false;select.disabled=false;updateInventoryActions();}});typeCell.append(select);
+      select.addEventListener('change',async()=>{if(busy){select.value=t.table_type||'upload';notify('请等待当前操作完成',true);return;}const value=select.value;busy=true;select.disabled=true;try{await postJSON('/api/template/type',{id:t.id,table_type:value});inventoryAICache={};resetInventory(false);await load();notify('已改为'+TABLE_TYPES[value]);}catch(e){select.value=t.table_type||'upload';notify(e.message,true);}finally{busy=false;select.disabled=false;updateInventoryActions();}});typeCell.append(select);selectSwitch(select,{compact:true});
     }
     cell(tr,t.version);cell(tr,new Date(t.created_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}));
     const action=cell(tr,'');const link=document.createElement('a');link.href='/api/download/'+encodeURIComponent(t.id);link.textContent='↓ 下载原件';action.append(link);if(currentRole!=='viewer'){const fill=document.createElement('button');fill.className='text-button';fill.type='button';fill.textContent='填写';fill.addEventListener('click',()=>{if(busy)return;openFillTemplate(t);});action.append(fill);}if(currentRole!=='viewer'){const move=document.createElement('button');move.className='text-button';move.textContent='设置店铺';move.addEventListener('click',async()=>{const shop=prompt('输入归属店铺；含账户标识的同来源模板会一起调整。无账户来源的模板才可设为“通用模板”',t.shop||'通用模板');if(shop===null)return;try{await postJSON('/api/template-shop',{id:t.id,shop});inventoryAICache={};resetInventory(false);await load();notify('已更新店铺归属');}catch(e){notify(e.message,true);}});action.append(move);const remove=document.createElement('button');remove.className='text-button delete-template';remove.textContent='删除';remove.setAttribute('aria-label','删除模板 '+t.original_name);remove.addEventListener('click',async()=>{
@@ -491,7 +587,7 @@ function batchRenderRow(row){
       if(key==='version')row.versionTouched=true;if(key==='table_type')row.typeTouched=true;
       batchRefresh();
     });
-    const td=document.createElement('td');td.dataset.label=label;td.append(element);tr.append(td);row.inputs[key]=element;
+    const td=document.createElement('td');td.dataset.label=label;td.append(element);tr.append(td);row.inputs[key]=element;if(key==='table_type')selectSwitch(element,{compact:true});
   };
   const shop=document.createElement('input');shop.setAttribute('list','shop-options');shop.maxLength=120;shop.placeholder='填写真实店铺名称';field('shop',shop);
   const market=document.createElement('select');market.append(new Option('选择站点',''),...[...$('marketplace').options].filter(o=>o.value).map(o=>new Option(o.text,o.value)));field('marketplace',market);
@@ -910,11 +1006,12 @@ $('alias-refresh').addEventListener('click',async()=>{if(busy)return;try{invalid
 
 // Filled workbooks stay local downloads; shared originals are read-only inputs.
 let fillReport=null,fillMapping=null,fillDefaults={},fillDirty=false,fillSourceFile=null,fillReading=false,fillRevision=0,fillInspectSequence=0;
-function resetFill(){clearFillCopy(true);fillRevision++;fillReport=null;fillMapping=null;fillDefaults={};fillDirty=false;$('fill-mapping-panel').hidden=true;$('fill-result').hidden=true;$('fill-dirty-note').textContent='';}
+function resetFill(){resetPrecheck();clearFillCopy(true);fillRevision++;fillReport=null;fillMapping=null;fillDefaults={};fillDirty=false;$('fill-mapping-panel').hidden=true;$('fill-result').hidden=true;$('fill-dirty-note').textContent='';}
 function updateFillActions(){
   updateFillCopyActions();
   $('fill-preview').disabled=busy||fillReading||!$('fill-template').value||!fillSourceFile||fillSourceFile!==$('fill-file').files[0];
   const canDownload=!!fillReport&&!fillDirty&&!(fillReport.template.prefilled&&!$('fill-replace').checked);
+  updatePrecheckActions();
   $('fill-download-draft').disabled=busy||!canDownload;$('fill-download-strict').disabled=busy||!canDownload||fillReport?.status!=='ready';$('fill-recheck').disabled=busy||!fillReport;
 }
 function updateFillOptions(){
@@ -1148,8 +1245,9 @@ function renderReport(){
   if(data.counts.unknown)counts.push(['待确认',data.counts.unknown,'unknown']);
   counts.push(['涉及 SKU',data.skus,'']);
   $('report-counts').replaceChildren(...counts.map(([label,value,level])=>{const box=document.createElement('div'),strong=document.createElement('strong'),span=document.createElement('span');box.className='report-count'+(level?' level-'+level:'');strong.textContent=value;span.textContent=label;box.append(strong,span);return box;}));
-  const meta=[data.filename,data.format==='excel'?'Excel 处理报告':'文本处理报告'];
-  if(data.summary.processed!=null)meta.push('亚马逊处理 '+data.summary.processed+' 条'+(data.summary.successful!=null?'，成功 '+data.summary.successful+' 条':''));
+  const precheck=data.format==='precheck';
+  const meta=precheck?['亚马逊预检（只校验，未提交）','第 '+data.range.start+'–'+(data.range.start+data.range.count-1)+' 个商品 / 共 '+data.range.total+' 个']:[data.filename,data.format==='excel'?'Excel 处理报告':'文本处理报告'];
+  if(data.summary.processed!=null)meta.push(precheck?'已发送 '+data.summary.processed+' 个，通过 '+data.summary.successful+' 个':'亚马逊处理 '+data.summary.processed+' 条'+(data.summary.successful!=null?'，成功 '+data.summary.successful+' 条':''));
   if(data.template)meta.push('按模板「'+data.template.category+' · '+data.template.version+'」识别字段');
   meta.push(data.matched_fields+' 条已对上具体字段');
   $('report-meta').textContent=meta.join(' · ')+(data.notes?.length?'。'+data.notes.join('；'):'')+(data.truncated?'。问题过多，只读取了前 20000 条。':'');
@@ -1220,3 +1318,501 @@ $('report-export').addEventListener('click',()=>{
   saveDownloadBlob(new Blob(['﻿'+lines.map(row=>row.map(csvCell).join(',')).join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'}),'处理报告问题清单.csv');
 });
 $('logout').addEventListener('click',()=>{reportData=null;reportFile=null;reportKind=null;reportLevel='';reportTemplateChosen=false;$('report-file').value='';$('report-file-name').textContent=REPORT_PROMPT;$('report-submit').disabled=true;$('report-result').hidden=true;});
+
+// Amazon SP-API: read-only SKU lookup, and a validation-only pre-check of the fill draft.
+// Credentials never reach the browser; the server only reports whether they are configured.
+let amazonStatus=null,amazonResult=null,amazonBusy=false,precheckSequence=0;
+const LISTING_STATUS={BUYABLE:'可售',DISCOVERABLE:'可搜索到'};
+async function loadAmazonStatus(){
+  try{amazonStatus=await request('/api/amazon/status');}catch(e){amazonStatus=null;}
+  renderAmazonStatus();updatePrecheckActions();
+}
+function renderAmazonStatus(){
+  const s=amazonStatus,ready=!!s?.configured;
+  $('amazon-state').textContent=!s?'无法读取配置状态':ready?'已配置':'尚未配置';
+  $('amazon-connection').classList.toggle('ready',ready);$('amazon-connection-icon').replaceChildren(svgIcon(ready?'check':'plug'));
+  $('amazon-connection-text').textContent=!s?'暂时无法读取接口配置状态，请稍后点“重新读取配置”。':ready?'接口凭证已配置'+(s.seller_hint?'，卖家编号 '+s.seller_hint:'')+'。支持站点：AE、SA。':'接口凭证尚未配置完整，缺少：'+s.missing.join('、')+'。'+(currentRole==='admin'?'请按下方说明在服务器本机配置。':'请联系管理员在服务器本机配置。');
+  $('amazon-connection-detail').textContent=s?[s.problem,ready?'凭证保存在：'+s.source:'',ready?'接口地区：欧洲区（含阿联酋、沙特）':'',s.plain_file&&s.in_vault?'凭证文件里还留着明文，确认连接正常后可以删掉那个文件':''].filter(Boolean).join(' · '):'';
+  const admin=currentRole==='admin';$('amazon-credentials').hidden=!admin||!s?.vault;$('cred-forget').hidden=!s?.in_vault;
+  $('amazon-credentials-title').textContent=s?.in_vault?'更换凭证':'填写亚马逊凭证';
+  $('amazon-credentials-note').textContent=s?.vault?'保存后由 '+s.vault_name+' 加密保管，只有这台电脑上当前的 Windows 账户能读取；这里不会显示已保存的内容。'+(s.in_vault?'只更换其中一项时，其余留空即可。':'')+'填写前请先停止屏幕共享。':'';
+  $('amazon-config-file').textContent=s?.config_file||'';
+  $('amazon-test').hidden=currentRole!=='admin';$('amazon-test').disabled=!ready||amazonBusy;$('amazon-setup').hidden=currentRole!=='admin';if(s&&!s.vault&&!ready&&admin)$('amazon-setup').open=true;
+  $('amazon-lookup').disabled=!ready||amazonBusy;
+}
+function showAmazon(){
+  if(!amazonStatus)loadAmazonStatus();else renderAmazonStatus();
+  $('amazon-from-draft').hidden=!(fillReport?.row_sources?.length);
+  const pick=$('check-template'),chosen=pick.value;pick.replaceChildren(...templates.filter(t=>['AE','SA'].includes(t.marketplace)).map(t=>new Option([t.shop||'通用模板',t.marketplace,TABLE_TYPES[t.table_type||'upload'],t.category,t.version].join(' · '),t.id)));if(chosen)pick.value=chosen;$('check-run').disabled=!pick.options.length||currentRole==='viewer';$('check-run').hidden=currentRole==='viewer';pick.hidden=currentRole==='viewer';if(currentRole==='viewer')$('check-status').textContent='模板对照由管理员或编辑者操作。';
+}
+$('amazon-refresh').addEventListener('click',async()=>{await loadAmazonStatus();notify(amazonStatus?.configured?'已读取到完整的接口凭证':'接口凭证仍未配置完整',!amazonStatus?.configured);});
+$('amazon-test').addEventListener('click',async()=>{
+  if(amazonBusy)return;amazonBusy=true;renderAmazonStatus();$('amazon-test').textContent='正在连接…';
+  try{
+    const result=await postJSON('/api/amazon/test',{});
+    $('amazon-markets').replaceChildren(...result.marketplaces.map(m=>{const tag=document.createElement('span');tag.className='tag'+(m.participating?' amazon-market-on':'');tag.textContent=(m.name||m.id)+(m.country?'（'+m.country+'）':'')+' · '+(m.participating?'在售':'未参与')+(m.suspended?' · 有被停售的商品':'');return tag;}));
+    notify(result.marketplaces.length?'连接成功，读到 '+result.marketplaces.length+' 个站点':'连接成功，但没有读到站点');
+  }catch(e){$('amazon-markets').replaceChildren();notify(e.message,true);}
+  finally{amazonBusy=false;$('amazon-test').textContent='测试连接';renderAmazonStatus();}
+});
+$('amazon-from-draft').addEventListener('click',()=>{
+  const skus=[...new Set((fillReport?.row_sources||[]).map(r=>r.sku).filter(Boolean))];
+  $('amazon-skus').value=skus.slice(0,50).join('\n');if(fillReport?.marketplace)$('amazon-market').value=fillReport.marketplace;
+  $('amazon-lookup-status').textContent=skus.length>50?'草稿共有 '+skus.length+' 个 SKU，已带入前 50 个；其余请分批查询。':'已带入 '+skus.length+' 个 SKU。';
+});
+function renderAmazonResult(){
+  const data=amazonResult;$('amazon-result').hidden=!data;$('amazon-export').hidden=!data;if(!data)return;
+  $('amazon-rows').replaceChildren(...data.items.map(item=>{
+    const tr=document.createElement('tr');const sku=cell(tr,''),name=document.createElement('b');name.textContent=item.sku;sku.append(name);
+    if(!item.found){const note=cell(tr,item.note||'未找到','amazon-missing');note.colSpan=4;return tr;}
+    const state=cell(tr,'');const labels=item.status.length?item.status.map(code=>LISTING_STATUS[code]||code):['不可售'];
+    for(const text of labels){const tag=document.createElement('span');tag.className='report-level '+(item.status.length?'level-ok':'level-error');tag.textContent=text;state.append(tag,' ');}
+    const product=cell(tr,''),title=document.createElement('b');title.textContent=item.title||'（无标题）';const small=document.createElement('small');small.textContent=[item.asin,item.product_type].filter(Boolean).join(' · ');product.append(title,small);
+    const offer=cell(tr,'');const price=document.createElement('b');price.textContent=item.offers.length?item.offers.map(o=>o.amount+' '+o.currency+(o.type&&o.type!=='B2C'?'（'+o.type+'）':'')).join('；'):'未读到售价';const stock=document.createElement('small');stock.textContent=item.stock.length?item.stock.map(f=>(f.channel==='DEFAULT'?'自配送':f.channel||'渠道')+'：'+(f.quantity??'—')).join('；'):'未读到自配送数量';offer.append(price,stock);if(currentRole!=='viewer'){const edit=el('button','text-button','改价 / 改库存');edit.type='button';edit.addEventListener('click',()=>{$('ops-lines').value=item.sku+', , ';location.hash='ops';notify('已带入 '+item.sku+'，在 SKU 后面填新售价和新库存');});offer.append(edit);}
+    const issues=cell(tr,'');
+    if(!item.issues.length){issues.textContent='没有问题';issues.className='amazon-clean';}
+    for(const issue of item.issues){const box=document.createElement('div');box.className='amazon-issue';const head=document.createElement('b');head.textContent=issue.title+(issue.attributes.length?' · '+issue.attributes.join('、'):'');const hint=document.createElement('p');hint.textContent=issue.hint;const original=document.createElement('small');original.className='report-original';original.textContent='亚马逊原文'+(issue.code?' '+issue.code:'')+'：'+issue.message;box.append(reportChip(issue.severity),head,hint,original);issues.append(box);}
+    return tr;
+  }));
+}
+$('amazon-lookup-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(amazonBusy)return;const skus=$('amazon-skus').value.split(/[\r\n,;，；\t]+/).map(s=>s.trim()).filter(Boolean);
+  if(!skus.length){notify('请先填写要查询的 SKU',true);return;}
+  amazonBusy=true;renderAmazonStatus();$('amazon-lookup').textContent='正在查询…';$('amazon-lookup-status').textContent='正在向亚马逊查询 '+new Set(skus).size+' 个 SKU，请稍候。';
+  try{
+    amazonResult=await postJSON('/api/amazon/listings',{marketplace:$('amazon-market').value,skus});renderAmazonResult();
+    const found=amazonResult.items.filter(i=>i.found),withIssues=found.filter(i=>i.issues.length).length;
+    $('amazon-lookup-status').textContent=amazonResult.marketplace+' 站点：查到 '+found.length+' 个，未找到 '+(amazonResult.items.length-found.length)+' 个，其中 '+withIssues+' 个有亚马逊标出的问题。';
+  }catch(e){$('amazon-lookup-status').textContent=e.message;notify(e.message,true);}
+  finally{amazonBusy=false;$('amazon-lookup').textContent='查询状态';renderAmazonStatus();}
+});
+$('amazon-export').addEventListener('click',()=>{
+  if(!amazonResult)return;
+  const csvCell=value=>{let text=String(value??'');if(/^[=+\-@\t\r]/.test(text))text="'"+text;return /[",\r\n]/.test(text)?'"'+text.replace(/"/g,'""')+'"':text;};
+  const lines=[['SKU','是否找到','状态','ASIN','商品类型','标题','售价','可售数量','问题级别','问题','处理建议','亚马逊原文']];
+  for(const item of amazonResult.items){
+    const base=[item.sku,item.found?'是':'否',item.found?(item.status.join(' / ')||'不可售'):item.note||'',item.asin||'',item.product_type||'',item.title||'',item.found?item.offers.map(o=>o.amount+' '+o.currency).join('；'):'',item.found?item.stock.map(f=>f.channel+':'+(f.quantity??'')).join('；'):''];
+    if(!item.found||!item.issues.length)lines.push([...base,'','','','']);
+    else for(const issue of item.issues)lines.push([...base,REPORT_LEVELS[issue.severity],issue.title,issue.hint,(issue.code?issue.code+' ':'')+issue.message]);
+  }
+  saveDownloadBlob(new Blob(['﻿'+lines.map(row=>row.map(csvCell).join(',')).join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'}),'亚马逊SKU状态_'+amazonResult.marketplace+'.csv');
+});
+function resetPrecheck(){precheckSequence++;fillSubmitItems=[];renderFillSubmit();$('fill-precheck-progress').hidden=true;$('fill-precheck-status').textContent='';$('fill-precheck-open').hidden=true;$('fill-precheck-consent').checked=false;$('fill-precheck-start').value='1';}
+function updatePrecheckActions(){
+  const box=$('fill-precheck');if(!box)return;box.hidden=!fillReport;if(!fillReport)return;
+  if(!amazonStatus&&!amazonStatusLoading){amazonStatusLoading=true;loadAmazonStatus().finally(()=>{amazonStatusLoading=false;});}
+  const ready=!!amazonStatus?.configured;
+  $('fill-precheck-run').disabled=busy||fillDirty||!ready||!$('fill-precheck-consent').checked||!fillReport.output_rows;
+  if(!$('fill-precheck-status').dataset.live&&$('fill-precheck-open').hidden)$('fill-precheck-status').textContent=!amazonStatus?'正在读取亚马逊接口配置状态…':!ready?'亚马逊接口凭证尚未配置，暂时不能预检。'+(currentRole==='admin'?'请到“亚马逊接口”页按说明配置。':'请联系管理员配置。'):fillDirty?'字段对应关系已调整，请先重新检查再预检。':fillReport.errors?'本地检查还有 '+fillReport.errors+' 个错误，建议先处理；也可以直接预检看亚马逊的意见。':'本批共 '+fillReport.output_rows+' 个商品，一次最多预检 100 个。';
+}
+let amazonStatusLoading=false;
+$('fill-precheck-consent').addEventListener('change',updatePrecheckActions);
+$('fill-precheck-open').addEventListener('click',()=>{location.hash='report';});
+$('fill-precheck-run').addEventListener('click',async()=>{
+  if(busy||!fillReport||fillDirty)return;const file=$('fill-file').files[0];if(!file||file!==fillSourceFile){notify('产品资料已变化，请重新读取',true);return;}
+  const start=Number($('fill-precheck-start').value),limit=Number($('fill-precheck-limit').value);
+  if(!Number.isInteger(start)||!Number.isInteger(limit)||start<1||limit<1||limit>100||start>fillReport.output_rows){notify('预检范围无效：起始序号须在 1 到 '+fillReport.output_rows+' 之间，一次最多 100 个',true);return;}
+  const revision=fillRevision,sequence=++precheckSequence,job='precheck-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
+  busy=true;const controls=[...$('fill-panel').querySelectorAll('input,select,button')],states=controls.map(c=>c.disabled);controls.forEach(c=>c.disabled=true);
+  const progress=$('fill-precheck-progress'),status=$('fill-precheck-status');progress.hidden=false;progress.max=1;progress.value=0;status.dataset.live='1';status.textContent='正在读取资料并发送预检…';
+  let active=true,pollTimer;
+  async function poll(){try{const state=await request('/api/inventory/progress?job_id='+encodeURIComponent(job));if(active&&state.total){progress.max=state.total;progress.value=state.completed||0;status.textContent='亚马逊正在校验 '+(state.completed||0)+' / '+state.total+' 个商品…';}}catch(e){/* the pre-check request itself reports errors */}if(active)pollTimer=setTimeout(poll,1000);}
+  pollTimer=setTimeout(poll,1000);
+  try{
+    const result=await sendFile('/api/fill/precheck',file,{...fillPayload(),precheck_consent:true,precheck_start:start,precheck_limit:limit,job_id:job});
+    if(revision!==fillRevision||sequence!==precheckSequence)return;
+    reportData=result;reportLevel='';reportKind=null;reportTemplateChosen=false;$('report-search').value='';
+    for(const other of document.querySelectorAll('#report-levels [data-level]'))other.setAttribute('aria-pressed',String(other.dataset.level===''));
+    progress.max=1;progress.value=1;const c=result.counts;
+    status.textContent='预检完成（未提交）：发送 '+result.summary.processed+' 个，通过 '+result.summary.successful+' 个；错误 '+c.error+' 条，警告 '+c.warning+' 条'+(c.unknown?'，待确认 '+c.unknown+' 条':'')+'。'+(result.notes.length?result.notes.join('；')+'。':'')+(result.range.start+result.range.count-1<result.range.total?'还有后续商品未预检，可调整起始序号继续。':'');
+    $('fill-precheck-open').hidden=false;renderFillMappings();fillSubmitItems=result.submittable||[];renderFillSubmit();
+    notify(c.error?'亚马逊预检发现 '+c.error+' 条错误，出问题的字段已标红':'亚马逊预检没有发现错误');
+  }catch(error){if(revision===fillRevision&&sequence===precheckSequence){fillSubmitItems=[];renderFillSubmit();progress.hidden=true;$('fill-precheck-open').hidden=true;status.textContent=error.message;notify(error.message,true);}}
+  finally{active=false;clearTimeout(pollTimer);busy=false;controls.forEach((c,i)=>{if(c.isConnected)c.disabled=states[i];});const kept=status.textContent;delete status.dataset.live;updateFillActions();status.textContent=kept;}
+});
+$('logout').addEventListener('click',()=>{amazonStatus=null;amazonResult=null;$('amazon-skus').value='';$('amazon-markets').replaceChildren();$('amazon-lookup-status').textContent='';renderAmazonResult();});
+
+// Store operations. Everything here reads, except the per-SKU "提交" button on the price/stock page.
+const el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!=null)node.textContent=text;return node;};
+const localTime=value=>{const d=new Date(value);return value&&!isNaN(d)?d.toLocaleString('zh-CN',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'';};
+const csvSafe=value=>{let text=String(value??'');if(/^[=+\-@\t\r]/.test(text))text="'"+text;return /[",\r\n]/.test(text)?'"'+text.replace(/"/g,'""')+'"':text;};
+const saveCsv=(lines,name)=>saveDownloadBlob(new Blob(['﻿'+lines.map(row=>row.map(csvSafe).join(',')).join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'}),name);
+function countBoxes(target,items){$(target).replaceChildren(...items.map(([label,value,level])=>{const box=el('div','report-count'+(level?' level-'+level:''));box.append(el('strong','',value),el('span','',label));return box;}));}
+function issueBoxes(issues){return issues.map(issue=>{const box=el('div','amazon-issue');box.append(reportChip(issue.severity),el('b','',issue.title+(issue.attributes?.length?' · '+issue.attributes.join('、'):'')),el('p','',issue.hint),el('small','report-original','亚马逊原文'+(issue.code?' '+issue.code:'')+'：'+issue.message));return box;});}
+async function withButton(button,label,work){if(button.disabled)return;const text=button.textContent;button.disabled=true;button.textContent=label;try{await work();}catch(e){notify(e.message,true);}finally{button.disabled=false;button.textContent=text;}}
+
+// Price and stock: read current values, preview at Amazon, then one confirmed submit per SKU.
+let opsResult=null;
+function parseOpsLines(){
+  const items=[];
+  for(const [index,line] of $('ops-lines').value.split(/\r?\n/).entries()){
+    if(!line.trim())continue;const parts=line.split(/[,，\t]/).map(p=>p.trim());
+    if(parts.length>3||!parts[0])throw new Error('第 '+(index+1)+' 行格式不对，应为：SKU, 新售价, 新库存');
+    const item={sku:parts[0],price:parts[1]||null,quantity:null};
+    if(parts[2]){if(!/^\d+$/.test(parts[2]))throw new Error('第 '+(index+1)+' 行的库存应为整数');item.quantity=Number(parts[2]);}
+    if(item.price&&!/^\d{1,7}(\.\d{1,2})?$/.test(item.price))throw new Error('第 '+(index+1)+' 行的售价应为最多两位小数的数字');
+    if(item.price==null&&item.quantity==null)throw new Error('第 '+(index+1)+' 行没有填写新售价或新库存');
+    items.push(item);
+  }
+  if(!items.length)throw new Error('请先填写要修改的 SKU');if(items.length>20)throw new Error('一次最多 20 行，请分批');
+  return items;
+}
+function renderOps(){
+  const data=opsResult;$('ops-result').hidden=!data;if(!data)return;
+  $('ops-rows').replaceChildren(...data.items.map(row=>{
+    const tr=el('tr'),sku=cell(tr,'');sku.append(el('b','',row.sku),el('small','',[row.title,row.asin].filter(Boolean).join(' · ')));
+    const change=cell(tr,'');
+    for(const c of row.changes){const line=el('p','ops-change'+(c.same?' same':''));line.append(el('span','',c.label+'：'),el('s','',c.old===''?'未设置':c.old),el('span','',' → '),el('b','',c.new+' '+c.unit),c.same?el('small','','（未变）'):'');change.append(line);}
+    for(const note of row.notes)change.append(el('small','ops-note',note));
+    const check=cell(tr,'');
+    if(row.error)check.append(el('b','ops-blocked',row.error));else check.append(el('b','amazon-clean','预检通过'));
+    check.append(...issueBoxes(row.issues));
+    const action=cell(tr,'');
+    if(row.done){action.append(el('b',row.done.accepted?'amazon-clean':'ops-blocked',row.done.accepted?'已提交，亚马逊已接受':'亚马逊未接受：'+(row.done.status||'未知')),el('small','',row.done.submission?'提交编号 '+row.done.submission:''));action.append(...issueBoxes(row.done.issues||[]));}
+    else if(row.failed)action.append(el('b','ops-blocked',row.failed));
+    else if(row.token){
+      const label=el('label','ops-confirm'),box=el('input'),button=el('button','button','提交这一个 SKU');box.type='checkbox';button.type='button';button.disabled=true;
+      label.append(box,'我已核对 '+row.sku+' 的改动');box.addEventListener('change',()=>{button.disabled=!box.checked;});
+      button.addEventListener('click',async()=>{
+        if(!box.checked)return;button.disabled=true;box.disabled=true;button.textContent='正在提交…';
+        try{row.done=await postJSON('/api/amazon/change/submit',{token:row.token,sku:row.sku,confirmed:true});notify(row.done.accepted?row.sku+' 已提交到亚马逊':row.sku+' 未被亚马逊接受',!row.done.accepted);}
+        catch(e){row.failed=e.message;notify(e.message,true);}
+        row.token='';renderOps();loadOpsLog();
+      });
+      action.append(label,button);
+    }else action.append(el('small','','不能提交'));
+    return tr;
+  }));
+}
+$('ops-form').addEventListener('submit',event=>{event.preventDefault();withButton($('ops-preview'),'正在读取并预检…',async()=>{
+  let items;try{items=parseOpsLines();}catch(e){$('ops-status').textContent=e.message;throw e;}
+  $('ops-status').textContent='正在向亚马逊读取 '+items.length+' 个 SKU 的当前值并预检，这一步不修改店铺。';
+  try{opsResult=await postJSON('/api/amazon/change/preview',{marketplace:$('ops-market').value,items});}catch(e){$('ops-status').textContent=e.message;throw e;}
+  const ready=opsResult.items.filter(r=>r.token).length;
+  $('ops-status').textContent=opsResult.marketplace+' 站点：'+ready+' 个可以提交，'+(opsResult.items.length-ready)+' 个不能提交。请逐个核对后提交；预检结果 '+opsResult.valid_minutes+' 分钟内有效，过期需重新预检。';renderOps();
+});});
+async function loadOpsLog(){
+  try{
+    const rows=await postJSON('/api/amazon/change/log',{});
+    $('ops-log').replaceChildren(...rows.map(r=>{const tr=el('tr');cell(tr,localTime(r.time));cell(tr,r.user);cell(tr,r.marketplace+' · '+r.sku);cell(tr,r.changes.map(c=>c.label+' '+(c.old===''?'未设置':c.old)+' → '+c.new).join('；'));cell(tr,r.status==='ACCEPTED'?'已接受':r.status==='FAILED'?'提交失败：'+(r.note||''):'未接受（'+r.status+'）',r.status==='ACCEPTED'?'amazon-clean':'ops-blocked');return tr;}));
+    $('ops-log-note').textContent=rows.length?'显示本次启动以来最近 50 条；完整记录保存在服务器数据目录的 amazon-changes.jsonl。':'本次启动以来还没有提交记录。';
+  }catch(e){$('ops-log-note').textContent=e.message;}
+}
+$('ops-log-refresh').addEventListener('click',loadOpsLog);
+let fbaResult=null;
+$('fba-load').addEventListener('click',()=>withButton($('fba-load'),'正在读取…',async()=>{
+  $('fba-status').textContent='正在读取亚马逊物流库存…';
+  try{fbaResult=await postJSON('/api/amazon/fba-inventory',{marketplace:$('fba-market').value});}catch(e){$('fba-status').textContent=e.message;throw e;}
+  $('fba-result').hidden=false;$('fba-export').hidden=!fbaResult.items.length;
+  $('fba-rows').replaceChildren(...fbaResult.items.slice(0,500).map(i=>{const tr=el('tr');cell(tr,'').append(el('b','',i.sku),el('small','',i.asin));cell(tr,i.title);for(const v of [i.fulfillable,i.inbound,i.reserved,i.unfulfillable,i.total])cell(tr,String(v??0));return tr;}));
+  $('fba-status').textContent=fbaResult.marketplace+' 站点：'+fbaResult.items.length+' 个 SKU，可售合计 '+fbaResult.items.reduce((a,i)=>a+(i.fulfillable||0),0)+' 件。'+(fbaResult.truncated?'数量较多，只读取了前 '+fbaResult.items.length+' 个；完整清单请用“销售与报告”里的物流库存报告。':'');
+}));
+$('fba-export').addEventListener('click',()=>{if(fbaResult)saveCsv([['SKU','ASIN','商品','可售','入库途中','预留','不可售','合计'],...fbaResult.items.map(i=>[i.sku,i.asin,i.title,i.fulfillable,i.inbound,i.reserved,i.unfulfillable,i.total])],'亚马逊物流库存_'+fbaResult.marketplace+'.csv');});
+
+// Orders: no buyer details are requested or shown.
+const ORDER_STATUS={Pending:'待付款确认',Unshipped:'待发货',PartiallyShipped:'部分发货',Shipped:'已发货',Canceled:'已取消',Unfulfillable:'无法配送',PendingAvailability:'待到货',InvoiceUnconfirmed:'待确认发票'};
+let ordersResult=null;
+function renderOrders(){
+  const data=ordersResult;$('orders-result').hidden=!data;$('orders-export').hidden=!data?.orders.length;if(!data)return;
+  const open=(data.counts.Unshipped||0)+(data.counts.PartiallyShipped||0);
+  countBoxes('orders-counts',[['订单',data.orders.length,''],['待发货',open,open?'warning':''],['已发货',data.counts.Shipped||0,''],['已取消',data.counts.Canceled||0,''],...Object.entries(data.totals).map(([currency,amount])=>['金额（不含已取消）'+currency,amount,''])]);
+  $('orders-rows').replaceChildren(...data.orders.map(order=>{
+    const tr=el('tr');cell(tr,'').append(el('b','',order.id),order.business?el('small','','企业订单'):'');cell(tr,localTime(order.purchased));
+    cell(tr,'').append(el('span','report-level '+(['Unshipped','PartiallyShipped'].includes(order.status)?'level-warning':order.status==='Shipped'?'level-ok':order.status==='Canceled'?'':'level-suggestion'),ORDER_STATUS[order.status]||order.status));
+    cell(tr,order.channel==='AFN'?'亚马逊物流':order.channel==='MFN'?'自配送':order.channel);cell(tr,order.total.amount?order.total.amount+' '+order.total.currency:'—');cell(tr,(order.shipped||0)+' / '+(order.unshipped||0));cell(tr,localTime(order.ship_by));
+    const more=cell(tr,''),button=el('button','text-button','查看商品');button.type='button';more.append(button);
+    button.addEventListener('click',()=>withButton(button,'读取中…',async()=>{
+      if(tr.nextSibling?.classList?.contains('order-items')){tr.nextSibling.remove();return;}
+      const detail=await postJSON('/api/amazon/order-items',{id:order.id}),row=el('tr','order-items'),box=cell(row,'');box.colSpan=8;
+      for(const item of detail.items)box.append(el('p','',item.sku+' × '+item.ordered+(item.price.amount?' · '+item.price.amount+' '+item.price.currency:'')+' · '+item.title));
+      if(!detail.items.length)box.textContent='亚马逊没有返回商品明细。';tr.after(row);
+    }));
+    return tr;
+  }));
+}
+$('orders-form').addEventListener('submit',event=>{event.preventDefault();withButton($('orders-load'),'正在读取…',async()=>{
+  $('orders-status-text').textContent='正在读取订单…';
+  try{ordersResult=await postJSON('/api/amazon/orders',{marketplace:$('orders-market').value,days:Number($('orders-days').value),status:$('orders-status').value});}catch(e){$('orders-status-text').textContent=e.message;throw e;}
+  $('orders-status-text').textContent=ordersResult.marketplace+' 站点最近 '+ordersResult.days+' 天：'+ordersResult.orders.length+' 个订单。'+(ordersResult.truncated?'订单较多，只读取了最新的 '+ordersResult.orders.length+' 个；完整明细请用“销售与报告”里的订单报告。':'');renderOrders();
+});});
+$('orders-export').addEventListener('click',()=>{if(ordersResult)saveCsv([['订单号','下单时间','状态','配送','金额','币种','已发','未发','最晚发货'],...ordersResult.orders.map(o=>[o.id,o.purchased,ORDER_STATUS[o.status]||o.status,o.channel,o.total.amount,o.total.currency,o.shipped,o.unshipped,o.ship_by])],'订单_'+ordersResult.marketplace+'.csv');});
+
+// Sales per day, and reports Amazon prepares on request.
+$('sales-form').addEventListener('submit',event=>{event.preventDefault();withButton($('sales-load'),'正在读取…',async()=>{
+  $('sales-status').textContent='正在读取销售数据…';let data;
+  try{data=await postJSON('/api/amazon/sales',{marketplace:$('sales-market').value,days:Number($('sales-days').value)});}catch(e){$('sales-status').textContent=e.message;throw e;}
+  $('sales-result').hidden=false;$('sales-status').textContent=data.marketplace+' 站点最近 '+data.days+' 天，按当地日期统计；今天的数字还会变化。';
+  countBoxes('sales-counts',[['销售额 '+data.currency,data.sales,''],['订单数',data.orders,''],['件数',data.units,'']]);
+  barChart($('sales-chart'),data.rows.map(row=>({label:row.date.slice(5),value:Number(row.sales)||0,tip:row.date+' · '+(row.sales||0)+' '+row.currency+' · '+row.orders+' 单 · '+row.units+' 件'})),data.currency);
+  const top=Math.max(1,...data.rows.map(r=>Number(r.sales)||0));
+  $('sales-rows').replaceChildren(...[...data.rows].reverse().map(r=>{const tr=el('tr');cell(tr,r.date);cell(tr,r.sales?r.sales+' '+r.currency:'0');const bar=el('span','sales-bar');bar.style.width=Math.round((Number(r.sales)||0)/top*100)+'%';cell(tr,'','sales-bar-cell').append(bar);cell(tr,String(r.orders));cell(tr,String(r.units));cell(tr,r.average||'—');return tr;}));
+});});
+let exportId='',exportTimer,exportSequence=0;
+const EXPORT_STATES={IN_QUEUE:'排队中',IN_PROGRESS:'生成中'};
+$('export-kind').addEventListener('change',()=>{$('export-days').hidden=$('export-kind').value!=='orders';});
+async function pollExport(sequence,started){
+  if(sequence!==exportSequence)return;
+  try{
+    const data=await postJSON('/api/amazon/report',{id:exportId});if(sequence!==exportSequence)return;
+    if(data.status==='DONE'){
+      $('export-status').textContent=data.label+'（'+data.marketplace+'）已生成：共 '+data.total+' 行'+(data.total>data.rows.length?'，页面显示前 '+data.rows.length+' 行，下载的 CSV 包含全部。':'。');
+      $('export-result').hidden=false;$('export-download').hidden=!data.total;$('export-create').disabled=false;
+      const head=el('tr');for(const name of data.columns)head.append(el('th','',name));$('export-head').replaceChildren(head);
+      $('export-rows').replaceChildren(...data.rows.map(row=>{const tr=el('tr');for(const value of row)cell(tr,value);return tr;}));return;
+    }
+    if(data.status==='CANCELLED'||data.status==='FATAL'){$('export-status').textContent=data.note;$('export-create').disabled=false;return;}
+    $('export-status').textContent='亚马逊正在准备报告（'+(EXPORT_STATES[data.status]||data.status)+'），已等待 '+Math.round((Date.now()-started)/1000)+' 秒。可以先去别的页面，回来仍会显示。';
+    if(Date.now()-started>20*60*1000){$('export-status').textContent='等待超过 20 分钟，已停止查询。请稍后重新生成。';$('export-create').disabled=false;return;}
+    exportTimer=setTimeout(()=>pollExport(sequence,started),15000);
+  }catch(e){$('export-status').textContent=e.message;$('export-create').disabled=false;}
+}
+$('export-form').addEventListener('submit',async event=>{
+  event.preventDefault();if($('export-create').disabled)return;clearTimeout(exportTimer);const sequence=++exportSequence;$('export-create').disabled=true;$('export-result').hidden=true;$('export-download').hidden=true;$('export-status').textContent='正在向亚马逊申请报告…';
+  try{const made=await postJSON('/api/amazon/report/create',{kind:$('export-kind').value,marketplace:$('export-market').value,days:Number($('export-days').value)});exportId=made.id;exportTimer=setTimeout(()=>pollExport(sequence,Date.now()),8000);$('export-status').textContent='已申请“'+made.label+'”，亚马逊正在准备，通常需要 1–5 分钟。';}
+  catch(e){$('export-status').textContent=e.message;$('export-create').disabled=false;notify(e.message,true);}
+});
+$('export-download').addEventListener('click',()=>withButton($('export-download'),'正在下载…',async()=>{
+  const response=await fetch('/api/amazon/report/download',{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify({id:exportId})});
+  if(!response.ok){const error=await response.json();throw new Error(error.error||'下载失败');}
+  const match=(response.headers.get('Content-Disposition')||'').match(/filename\*=UTF-8''([^;]+)/i);saveDownloadBlob(await response.blob(),match?decodeURIComponent(match[1]):'亚马逊报告.csv');
+}));
+
+// Template columns compared with the definition Amazon serves today.
+$('check-run').addEventListener('click',()=>withButton($('check-run'),'正在对照…',async()=>{
+  $('check-status').textContent='正在读取亚马逊当前的字段定义…';let data;
+  try{data=await postJSON('/api/amazon/template-check',{template_id:$('check-template').value});}catch(e){$('check-status').textContent=e.message;throw e;}
+  $('check-status').textContent={match:'没有发现差异：模板包含亚马逊当前列出的必填字段，也没有亚马逊已不使用的列。条件必填的字段不在对照范围内。',review:'发现差异，请看下方明细。差异不一定代表模板不能用，但建议到卖家后台重新下载模板核对。',unknown:'没能取得任何商品类型的字段定义，无法对照。'}[data.status]+(data.generated_at?' 模板生成时间：'+data.generated_at.slice(0,10)+'。':'')+(data.more_types?' 模板声明的商品类型较多，只对照了前 8 个。':'');
+  $('check-result').hidden=false;
+  $('check-result').replaceChildren(...data.types.map(type=>{
+    const box=el('div','check-type');box.append(el('b','',type.product_type));
+    if(type.error){box.append(el('p','ops-blocked',type.error));return box;}
+    box.append(el('small','','亚马逊当前共 '+type.attributes+' 个字段，其中必填 '+type.required+' 个'+(type.version.latest?'':'（返回的不是最新版本定义）')));
+    box.append(el('p',type.missing_required.length?'ops-blocked':'amazon-clean',type.missing_required.length?'模板缺少 '+type.missing_required.length+' 个必填字段：'+type.missing_required.map(m=>m.title?m.title+'（'+m.attribute+'）':m.attribute).join('、'):'必填字段都在模板里'));
+    box.append(el('p',type.unknown_columns.length?'ops-note':'amazon-clean',type.unknown_columns.length?'模板有 '+type.unknown_columns.length+' 列不在亚马逊当前定义里：'+type.unknown_columns.map(u=>(u.column?u.column+' 列 ':'')+(u.label||u.attribute)).join('、'):'没有多余的列'));
+    return box;
+  }));
+}));
+$('logout').addEventListener('click',()=>{exportSequence++;clearTimeout(exportTimer);opsResult=null;ordersResult=null;fbaResult=null;exportId='';$('ops-lines').value='';renderOps();renderOrders();for(const id of ['fba-result','sales-result','export-result','check-result'])$(id).hidden=true;for(const id of ['ops-status','fba-status','orders-status-text','sales-status','export-status','check-status'])$(id).textContent='';$('ops-log').replaceChildren();$('export-create').disabled=false;});
+
+// Listing a new product: only rows Amazon just validated, one confirmed SKU at a time.
+let fillSubmitItems=[];
+function renderFillSubmit(){
+  const box=$('fill-submit');if(!box)return;box.hidden=!fillSubmitItems.length;if(!fillSubmitItems.length)return;
+  $('fill-submit-count').textContent=fillSubmitItems.filter(i=>i.done?.accepted).length+' / '+fillSubmitItems.length+' 个已上架';
+  $('fill-submit-rows').replaceChildren(...fillSubmitItems.map(item=>{
+    const tr=el('tr');cell(tr,'').append(el('b','',item.sku),el('small','',item.source_rows.length?'资料第 '+item.source_rows.join('、')+' 行':''));
+    cell(tr,'').append(el('b','',item.title||'（未填写标题）'),el('small','',item.product_type+' · 将提交 '+item.fields+' 个字段'));
+    const action=cell(tr,'');
+    if(item.done){action.append(el('b',item.done.accepted?'amazon-clean':'ops-blocked',item.done.accepted?'已提交，亚马逊已接受':'亚马逊未接受：'+(item.done.status||'未知')),el('small','',item.done.submission?'提交编号 '+item.done.submission:''));action.append(...issueBoxes(item.done.issues||[]));return tr;}
+    if(item.failed){action.append(el('b','ops-blocked',item.failed));return tr;}
+    if(item.exists)action.append(el('p','ops-blocked','亚马逊店铺里已经有这个 SKU'+(item.exists.title?'（'+item.exists.title+(item.exists.asin?' · '+item.exists.asin:'')+'）':'')+'。继续提交会用本次填写的内容整体覆盖它，本次没填的字段会被清空。'));
+    const label=el('label','ops-confirm'),check=el('input'),button=el('button',item.exists?'button danger':'button',item.exists?'覆盖现有商品并提交':'上架这一个 SKU');check.type='checkbox';button.type='button';button.disabled=true;
+    label.append(check,item.exists?'我确认要覆盖店铺里现有的 '+item.sku:'我已核对 '+item.sku+' 的填写内容');check.addEventListener('change',()=>{button.disabled=!check.checked;});
+    button.addEventListener('click',async()=>{
+      if(!check.checked)return;button.disabled=true;check.disabled=true;button.textContent='正在提交…';
+      try{
+        const result=await postJSON('/api/amazon/listing/submit',{token:item.token,sku:item.sku,confirmed:true,overwrite:!!item.exists});
+        if(result.needs_overwrite){item.exists=result;notify(item.sku+' 在店铺里已存在，尚未提交，请再次确认',true);}
+        else{item.done=result;notify(result.accepted?item.sku+' 已提交到亚马逊':item.sku+' 未被亚马逊接受',!result.accepted);}
+      }catch(e){item.failed=e.message;notify(e.message,true);}
+      renderFillSubmit();
+    });
+    action.append(label,button);return tr;
+  }));
+}
+
+// ---- Vector graphics: one icon set, a few line illustrations, and the sales chart ----
+const SVGNS='http://www.w3.org/2000/svg';
+const ICONS={
+  check:'<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  alert:'<path d="M12 4.5 21 19.5H3z"/><path d="M12 10v4.5M12 17.3v.1"/>',
+  plug:'<path d="M9 3.5v4M15 3.5v4"/><path d="M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5v4"/>',
+  chart:'<path d="M4.5 19.5h15"/><path d="M7 16v-4M12 16V7M17 16v-6"/>',
+  coin:'<circle cx="12" cy="12" r="8"/><path d="M14.8 9.3c-.5-.9-1.5-1.4-2.8-1.4-1.7 0-2.9.8-2.9 2.1 0 3 5.9 1.2 5.9 4.1 0 1.300-1.300 2.100-3 2.100-1.400 0-2.500-.6-3-1.600"/><path d="M12 6.300v1.600M12 16.200v1.600"/>',
+  box:'<path d="M4 8.5 12 4l8 4.500v7L12 20l-8-4.500z"/><path d="M4 8.500l8 4.500 8-4.500M12 13v7"/>',
+  truck:'<path d="M3.500 6.500h10v9.500h-10z"/><path d="M13.500 10h3.700l3.300 3.200v2.800h-7"/><circle cx="7.500" cy="17.500" r="1.800"/><circle cx="17" cy="17.500" r="1.800"/>',
+  folder:'<path d="M3.500 7.500a2 2 0 0 1 2-2h3.800l2 2h7.200a2 2 0 0 1 2 2v7.500a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
+  pencil:'<path d="M12.500 20h7.500"/><path d="M16.200 4.300a2.100 2.100 0 0 1 3 3L8.500 18l-4 1 1-4z"/>',
+  tag:'<path d="M3.500 12.200V5.500a2 2 0 0 1 2-2h6.700l8.300 8.300a2 2 0 0 1 0 2.800l-5.900 5.900a2 2 0 0 1-2.800 0z"/><circle cx="8" cy="8" r="1.300"/>',
+  search:'<circle cx="11" cy="11" r="6.500"/><path d="M20 20l-4.200-4.200"/>',
+  scan:'<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M8 10h8M8 14h5"/>',
+  download:'<path d="M12 4.500V15M8 11l4 4 4-4"/><path d="M4.500 14.500v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3"/>'
+};
+function svgIcon(name,cls){const svg=document.createElementNS(SVGNS,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('class','icon'+(cls?' '+cls:''));svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');svg.innerHTML=ICONS[name]||ICONS.chart;return svg;}
+const KPI_ICONS={'今日销售额':'coin','近 7 天销售额':'chart','近 7 天订单':'box','待发货':'truck','模板':'folder'};
+// Line illustrations share three strokes: outline, soft fill, and the one accent colour.
+const ART={
+  box:'<path class="il-soft" d="M34 44 80 26l46 18v38L80 100 34 82z"/><path class="il-line" d="M34 44 80 26l46 18v38L80 100 34 82z"/><path class="il-line" d="M34 44l46 18 46-18M80 62v38"/><path class="il-accent" d="M57 35l46 18v12"/><path class="il-line" d="M18 96h14M130 96h14M24 20v8M20 24h8"/>',
+  chart:'<rect class="il-soft" x="24" y="18" width="112" height="76" rx="8"/><rect class="il-line" x="24" y="18" width="112" height="76" rx="8"/><path class="il-line" d="M38 80h84"/><path class="il-line" d="M46 80V62M62 80V50M78 80V58M94 80V42"/><path class="il-accent" d="M110 80V34"/><path class="il-accent" d="M40 56l20-12 18 8 34-22"/><circle class="il-dot" cx="112" cy="30" r="3.500"/>',
+  search:'<rect class="il-soft" x="26" y="20" width="84" height="72" rx="8"/><rect class="il-line" x="26" y="20" width="84" height="72" rx="8"/><path class="il-line" d="M40 38h44M40 52h56M40 66h30"/><circle class="il-white" cx="108" cy="70" r="17"/><circle class="il-accent" cx="108" cy="70" r="17"/><path class="il-accent" d="M121 83l13 13"/>',
+  plug:'<path class="il-soft" d="M46 74a17 17 0 0 1-2-33.800 23 23 0 0 1 44.500 5.800A14 14 0 0 1 88 74z"/><path class="il-line" d="M46 74a17 17 0 0 1-2-33.800 23 23 0 0 1 44.500 5.800A14 14 0 0 1 88 74z"/><path class="il-accent" d="M104 46v10M118 46v10"/><path class="il-accent" d="M98 56h26v7a13 13 0 0 1-26 0z"/><path class="il-accent" d="M111 76v6a10 10 0 0 1-10 10H78"/><path class="il-line" d="M60 92h10"/>',
+  tag:'<path class="il-soft" d="M30 58V30a6 6 0 0 1 6-6h28l42 42a6 6 0 0 1 0 8.500L80 100.500a6 6 0 0 1-8.500 0z"/><path class="il-line" d="M30 58V30a6 6 0 0 1 6-6h28l42 42a6 6 0 0 1 0 8.500L80 100.500a6 6 0 0 1-8.500 0z"/><circle class="il-line" cx="48" cy="42" r="5"/><path class="il-accent" d="M122 30v26M112 40l10-10 10 10"/><path class="il-accent" d="M70 62l12 12M62 70l12 12"/>',
+  report:'<path class="il-soft" d="M44 16h46l22 22v56H44z"/><path class="il-line" d="M44 16h46l22 22v56H44z"/><path class="il-line" d="M90 16v22h22"/><path class="il-line" d="M56 50h30M56 62h44M56 74h22"/><circle class="il-white" cx="112" cy="84" r="16"/><circle class="il-accent" cx="112" cy="84" r="16"/><path class="il-accent" d="M112 76v15M106 86l6 6 6-6"/>',
+  compare:'<rect class="il-soft" x="24" y="22" width="48" height="66" rx="6"/><rect class="il-line" x="24" y="22" width="48" height="66" rx="6"/><path class="il-line" d="M34 38h28M34 50h28M34 62h18"/><rect class="il-soft" x="88" y="22" width="48" height="66" rx="6"/><rect class="il-line" x="88" y="22" width="48" height="66" rx="6"/><path class="il-line" d="M98 38h28M98 50h28"/><path class="il-accent" d="M98 68l8 8 16-17"/><path class="il-accent" d="M74 50h12M82 46l4 4-4 4"/>'
+};
+function artwork(name){const svg=document.createElementNS(SVGNS,'svg');svg.setAttribute('viewBox','0 0 160 110');svg.setAttribute('class','art');svg.setAttribute('aria-hidden','true');svg.innerHTML=ART[name];return svg;}
+function emptyState(name,title,text){const box=el('div','empty-state');box.append(artwork(name),el('b','',title),el('p','',text));return box;}
+for(const [id,name,title,text] of [
+  ['amazon-result','search','输入 SKU 查询','可以看到商品是否在售、售价、库存，以及亚马逊标出的问题。'],
+  ['ops-result','tag','还没有要提交的改动','每行填一个 SKU 和新的售价或库存，先预检，再逐个核对提交。'],
+  ['fba-result','box','还没有读取物流库存','点上面的按钮，读取放在亚马逊仓库里的库存。'],
+  ['orders-result','box','还没有订单数据','连接亚马逊后，打开这一页会自动读取最近的订单。'],
+  ['sales-result','chart','还没有销售数据','连接亚马逊后，打开这一页会自动读取每日销售。'],
+  ['export-result','report','还没有生成报告','选好报告类型，点“生成报告”，等亚马逊准备好就能预览和下载。'],
+  ['check-result','compare','还没有对照结果','选一份模板，点“开始对照”，看它和亚马逊现在的字段要求差在哪。']
+])$(id).after(emptyState(name,title,text));
+$('home-connect').prepend(artwork('plug'));
+{const mark=el('span','status-mark');mark.id='amazon-connection-icon';$('amazon-connection').prepend(mark);}
+for(const note of document.querySelectorAll('.ops-warning')){const text=el('span');text.append(...note.childNodes);note.append(svgIcon('alert'),text);}
+{const marks={'#fill':'pencil','#ops':'tag','#amazon':'search','#inventory':'scan','#library':'folder','#sales':'download'};for(const link of document.querySelectorAll('.home-actions a')){const text=el('span','home-action-text');text.append(...link.childNodes);const mark=el('i','home-action-icon');mark.append(svgIcon(marks[link.getAttribute('href')]||'chart'));link.append(mark,text);}}
+{const chart=el('div','home-chart sales-chart');chart.id='sales-chart';$('sales-counts').after(chart);}
+
+// Daily sales: one series, so one colour and no legend; the tooltip carries the exact figures.
+function niceCeiling(value){if(!(value>0))return 1;const power=10**Math.floor(Math.log10(value)),lead=value/power;return (lead<=1?1:lead<=2?2:lead<=5?5:10)*power;}
+function barChart(box,rows,unit){
+  box.replaceChildren();if(!rows.length)return;
+  const W=640,H=210,left=46,right=8,top=14,bottom=28,plotW=W-left-right,plotH=H-top-bottom,max=niceCeiling(Math.max(...rows.map(r=>r.value)));
+  const make=(tag,attrs,text)=>{const node=document.createElementNS(SVGNS,tag);for(const [k,v] of Object.entries(attrs))node.setAttribute(k,String(v));if(text!=null)node.textContent=text;return node;};
+  const svg=make('svg',{viewBox:'0 0 '+W+' '+H,class:'bar-chart',role:'img','aria-label':'每日销售额柱状图'+(unit?'，单位 '+unit:'')});
+  for(const part of [0,.5,1]){const y=top+plotH-plotH*part;svg.append(make('line',{x1:left,x2:W-right,y1:y,y2:y,class:part?'chart-grid':'chart-axis'}),make('text',{x:left-8,y:y+4,class:'chart-label','text-anchor':'end'},(max*part).toLocaleString('zh-CN',{maximumFractionDigits:max<10?1:0})));}
+  const band=plotW/rows.length,width=Math.max(3,Math.min(34,band*.62)),every=Math.ceil(rows.length/8),tip=el('div','chart-tip');tip.hidden=true;
+  rows.forEach((row,index)=>{
+    const x=left+band*index+(band-width)/2,height=Math.max(row.value>0?2:0,row.value/max*plotH),y=top+plotH-height,r=Math.min(4,width/2,height);
+    const bar=make('path',{class:'chart-bar',d:'M'+x+' '+(y+height)+'V'+(y+r)+'a'+r+' '+r+' 0 0 1 '+r+' '+(-r)+'h'+(width-2*r)+'a'+r+' '+r+' 0 0 1 '+r+' '+r+'V'+(y+height)+'z'});
+    const hit=make('rect',{x:left+band*index,y:top,width:band,height:plotH+bottom,class:'chart-hit',tabindex:0,'aria-label':row.tip});
+    const show=()=>{tip.textContent=row.tip;tip.hidden=false;tip.style.left=((x+width/2)/W*100)+'%';tip.style.top=(Math.max(0,y-6)/H*100)+'%';bar.classList.add('on');},hide=()=>{tip.hidden=true;bar.classList.remove('on');};
+    for(const name of ['mouseenter','focus'])hit.addEventListener(name,show);for(const name of ['mouseleave','blur'])hit.addEventListener(name,hide);
+    if(height>0)svg.append(bar);
+    if(index%every===0||index===rows.length-1&&rows.length<=8)svg.append(make('text',{x:x+width/2,y:H-8,class:'chart-label','text-anchor':'middle'},row.label));
+    svg.append(hit);
+  });
+  box.append(svg,tip);
+}
+
+// ---- Layout: tabs, one marketplace switch, the home page, the fill steps, folded help text ----
+for(const bar of document.querySelectorAll('.tabs'))for(const button of bar.querySelectorAll('[data-tab]'))button.addEventListener('click',()=>selectTab(bar,button.dataset.tab));
+function selectTab(bar,name){
+  for(const button of bar.querySelectorAll('[data-tab]'))button.setAttribute('aria-selected',String(button.dataset.tab===name));
+  for(const panel of bar.parentElement.querySelectorAll(':scope > [data-tab-panel]'))panel.hidden=panel.dataset.tabPanel!==name;
+  if(name==='log')loadOpsLog();
+}
+// Long explanations fold away under one "说明" line per page; status lines stay where they are.
+for(const panel of document.querySelectorAll('.panel')){
+  const notes=[...panel.querySelectorAll(':scope > p.hint, :scope > .tab-panel > p.hint')].filter(note=>!note.id&&!note.getAttribute('role')&&note.textContent.length>36);
+  for(const note of notes){const fold=el('details','page-help'),summary=el('summary','','说明');note.before(fold);fold.append(summary,note);}
+}
+
+const MARKET_SELECTS=['amazon-market','ops-market','fba-market','orders-market','sales-market','export-market'];
+let globalMarket='AE';
+try{if(localStorage.getItem('market')==='SA')globalMarket='SA';}catch(e){/* storage may be unavailable */}
+for(const id of MARKET_SELECTS){const select=$(id);(select.parentElement.tagName==='LABEL'?select.parentElement:select).classList.add('market-synced');}
+function setGlobalMarket(market,reload){
+  globalMarket=market;try{localStorage.setItem('market',market);}catch(e){/* ignore */}
+  for(const id of MARKET_SELECTS)$(id).value=market;
+  for(const button of document.querySelectorAll('#global-market [data-market]'))button.setAttribute('aria-pressed',String(button.dataset.market===market));
+  if(!reload)return;
+  const page=$('workspace').dataset.page;
+  if(page==='home')loadHome(true);
+  if(page==='orders'&&ordersResult)$('orders-form').requestSubmit($('orders-load'));
+  if(page==='sales'&&!$('sales-result').hidden)$('sales-form').requestSubmit($('sales-load'));
+  if(page==='ops'){opsResult=null;renderOps();$('ops-status').textContent='';$('fba-result').hidden=true;$('fba-status').textContent='';}
+  if(page==='amazon'){amazonResult=null;renderAmazonResult();$('amazon-lookup-status').textContent='';}
+}
+for(const button of document.querySelectorAll('#global-market [data-market]'))button.addEventListener('click',()=>setGlobalMarket(button.dataset.market,true));
+setGlobalMarket(globalMarket,false);
+async function amazonReady(){if(!amazonStatus)await loadAmazonStatus();return !!amazonStatus?.configured;}
+// Opening a page loads what it shows, so there is nothing to click first.
+async function enterPage(key){
+  if(key==='home'){loadHome(false);return;}
+  if(!['orders','sales'].includes(key)||!await amazonReady()||$('workspace').dataset.page!==key)return;
+  if(key==='orders'&&!ordersResult&&!$('orders-load').disabled)$('orders-form').requestSubmit($('orders-load'));
+  if(key==='sales'&&$('sales-result').hidden&&!$('sales-load').disabled)$('sales-form').requestSubmit($('sales-load'));
+}
+
+// Home: the numbers someone opens the tool to see.
+const homeCache={};let homeSequence=0;
+function kpi(label,value,note,href,level){const box=el(href?'a':'div','kpi'+(level?' level-'+level:''));if(href)box.href=href;const mark=el('i','kpi-icon');mark.append(svgIcon(KPI_ICONS[label]||'chart'));box.append(mark,el('span','',label),el('strong','',value),el('small','',note||''));return box;}
+function renderHome(data,message){
+  const editor=currentRole!=='viewer',ready=!!amazonStatus?.configured;
+  for(const link of document.querySelectorAll('[data-home-role="edit"]'))link.hidden=!editor;
+  $('home-template-count').textContent=templates.length+' 份模板';
+  $('home-connect').hidden=ready;$('home-connect-link').hidden=currentRole!=='admin';
+  $('home-connect-text').textContent=currentRole==='admin'?'连接后，这里会显示销售、待发货订单和最近的提交记录。':'连接后这里会显示店铺数据，请联系管理员在“设置”里完成连接。';
+  const showStore=ready&&editor;
+  for(const id of ['home-sales-card','home-orders-card','home-log-card'])$(id).hidden=!showStore;
+  const cards=[];
+  if(showStore){
+    const sales=data?.sales,orders=data?.open_orders,today=sales?.rows?.[sales.rows.length-1];
+    cards.push(kpi('今日销售额',sales?.rows?(today?today.sales||'0':'0'):'—',sales?.rows?(sales.currency+' · '+(today?today.orders:0)+' 单'):(sales?.error?'读取失败':'')),kpi('近 7 天销售额',sales?.rows?sales.sales:'—',sales?.rows?sales.currency+' · '+sales.units+' 件':'','#sales'),kpi('近 7 天订单',sales?.rows?String(sales.orders):'—','','#orders'),kpi('待发货',orders?.orders?String(orders.orders.length)+(orders.truncated?'+':''):'—',orders?.orders?(orders.orders.length?'需要尽快处理':'都已发出'):(orders?.error?'读取失败':''),'#orders',orders?.orders?.length?'warning':''));
+    const rows=sales?.rows||[],top=Math.max(1,...rows.map(row=>Number(row.sales)||0));
+    barChart($('home-chart'),rows.map(row=>({label:row.date.slice(5),value:Number(row.sales)||0,tip:row.date+' · '+(row.sales||0)+' '+row.currency+' · '+row.orders+' 单 · '+row.units+' 件'})),sales?.currency||'');
+    $('home-sales-note').textContent=sales?.error||(rows.length?'':'这 7 天没有销售数据。');
+    const open=orders?.orders||[];
+    $('home-orders').replaceChildren(...(open.length?open.slice(0,6).map(order=>{const line=el('div','home-row');line.append(el('b','',order.id),el('span','',(order.total.amount?order.total.amount+' '+order.total.currency+' · ':'')+order.unshipped+' 件未发'),el('small','',order.ship_by?'最晚 '+localTime(order.ship_by):''));return line;}):[el('p','hint',orders?.error||(data?'没有待发货的订单。':'正在读取…'))]));
+  }
+  cards.push(kpi('模板',String(templates.length),new Set(templates.map(t=>t.marketplace)).size+' 个站点 · '+new Set(templates.map(t=>t.category)).size+' 个类目','#library'));
+  $('home-kpis').replaceChildren(...cards);$('home-status').textContent=message||'';$('home-refresh').hidden=!showStore;
+}
+async function loadHome(force){
+  const sequence=++homeSequence,market=globalMarket;renderHome(homeCache[market]?.data,'');
+  if(currentRole==='viewer'||!await amazonReady()){if(sequence===homeSequence)renderHome(null,'');return;}
+  if(sequence!==homeSequence)return;
+  postJSON('/api/amazon/change/log',{}).then(rows=>{$('home-log').replaceChildren(...(rows.length?rows.slice(0,5).map(r=>{const line=el('div','home-row');line.append(el('b','',r.marketplace+' · '+r.sku),el('span','',r.changes.map(c=>c.label+(c.old?' '+c.old+' → ':' ')+c.new).join('；')),el('small',r.status==='ACCEPTED'?'amazon-clean':'ops-blocked',localTime(r.time)+' · '+r.user+' · '+(r.status==='ACCEPTED'?'已接受':'未成功')));return line;}):[el('p','hint','本次启动以来还没有提交过改动。')]));}).catch(()=>{});
+  const cached=homeCache[market];
+  if(cached&&!force&&Date.now()-cached.time<5*60*1000){renderHome(cached.data,market+' 站点 · '+localTime(cached.time)+' 的数据');return;}
+  renderHome(cached?.data,'正在读取 '+market+' 站点的数据…');
+  try{const data=await postJSON('/api/amazon/overview',{marketplace:market});homeCache[market]={data,time:Date.now()};if(sequence===homeSequence)renderHome(data,market+' 站点 · 刚刚更新');}
+  catch(e){if(sequence===homeSequence)renderHome(cached?.data,e.message);}
+}
+$('home-refresh').addEventListener('click',()=>loadHome(true));
+$('logout').addEventListener('click',()=>{for(const key of Object.keys(homeCache))delete homeCache[key];homeSequence++;});
+
+// Fill page: one step on screen at a time instead of everything stacked.
+const FILL_STEPS=[['fill-form','选模板和资料'],['fill-mapping-panel','核对字段'],['fill-copy-panel','生成文案'],['fill-result','检查与导出'],['fill-precheck','预检与上架']];
+let fillStep=0;
+(function setupFillSteps(){
+  const panel=$('fill-panel'),bar=el('ol','steps');bar.id='fill-steps';
+  panel.append($('fill-precheck'));$('fill-form').before(bar);
+  FILL_STEPS.forEach(([id,label],index)=>{const item=el('li'),button=el('button');button.type='button';button.append(el('i','',String(index+1)),el('span','',label));button.addEventListener('click',()=>showFillStep(index));item.append(button);bar.append(item);$(id).classList.add('fill-step');});
+  const empty=el('p','hint step-empty');empty.id='fill-step-empty';const foot=el('div','step-nav'),prev=el('button','button secondary','← 上一步'),next=el('button','button','下一步 →');prev.type=next.type='button';prev.id='fill-prev';next.id='fill-next';foot.append(prev,next);panel.append(empty,foot);
+  const reachable=(from,step)=>{for(let i=from+step;i>=0&&i<FILL_STEPS.length;i+=step)if(!$(FILL_STEPS[i][0]).hidden)return i;return -1;};
+  prev.addEventListener('click',()=>{const target=reachable(fillStep,-1);if(target>=0)showFillStep(target);});
+  next.addEventListener('click',()=>{const target=reachable(fillStep,1);if(target>=0)showFillStep(target);});
+  panel.classList.add('stepped');
+  let wasReady=false;
+  const watcher=new MutationObserver(()=>{
+    const ready=!$('fill-mapping-panel').hidden;
+    if(ready&&!wasReady&&fillStep===0)fillStep=1;   // the source was just read: move on to the fields
+    if(!ready)fillStep=0;                              // the draft was reset
+    wasReady=ready;showFillStep(fillStep);
+  });
+  for(const [id] of FILL_STEPS)watcher.observe($(id),{attributes:true,attributeFilter:['hidden']});
+  window.fillReachable=reachable;
+})();
+function showFillStep(index){
+  fillStep=index;const [id]=FILL_STEPS[index],section=$(id);
+  FILL_STEPS.forEach(([other],i)=>{$(other).classList.toggle('step-current',i===index);const button=$('fill-steps').children[i].firstChild,off=$(other).hidden&&i>0;button.classList.toggle('unavailable',off);if(i===index)button.setAttribute('aria-current','step');else button.removeAttribute('aria-current');button.classList.toggle('done',i<index&&!off);if(i<index&&!off)button.firstChild.replaceChildren(svgIcon('check'));else button.firstChild.textContent=String(i+1);});
+  const empty=$('fill-step-empty');empty.hidden=!section.hidden;
+  empty.textContent=section.hidden?(id==='fill-copy-panel'?'改价／库存表格不需要文案，这一步可以跳过。':'先完成第 1 步：选好模板和产品资料，点“读取模板并匹配字段”。'):'';
+  $('fill-prev').hidden=window.fillReachable(index,-1)<0;$('fill-next').hidden=window.fillReachable(index,1)<0;
+}
+showFillStep(0);
+
+// Credentials are typed once on the server computer and kept by the system vault; nothing is ever shown back.
+const CRED_FIELDS={client_id:'cred-client-id',client_secret:'cred-client-secret',refresh_token:'cred-refresh-token',seller_id:'cred-seller-id'};
+function clearCredentialFields(){for(const id of Object.values(CRED_FIELDS))$(id).value='';}
+$('amazon-credentials').addEventListener('submit',event=>{event.preventDefault();withButton($('cred-save'),'正在保存…',async()=>{
+  const body=Object.fromEntries(Object.entries(CRED_FIELDS).map(([key,id])=>[key,$(id).value.trim()]));
+  if(!Object.values(body).some(Boolean))throw new Error('请先填写要保存的内容');
+  amazonStatus=await postJSON('/api/amazon/credentials',body);clearCredentialFields();renderAmazonStatus();updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];
+  notify(amazonStatus.configured?'凭证已保存，点“测试连接”确认能连上':'已保存，但还不完整');
+});});
+$('cred-forget').addEventListener('click',()=>{
+  if(!confirm('清除这台电脑上保存的亚马逊凭证？清除后需要重新填写才能连接。'))return;
+  withButton($('cred-forget'),'正在清除…',async()=>{amazonStatus=await postJSON('/api/amazon/credentials/delete',{});clearCredentialFields();$('amazon-markets').replaceChildren();renderAmazonStatus();updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];notify('已清除保存的凭证');});
+});
+$('logout').addEventListener('click',clearCredentialFields);
+
+// Two-to-three way choices become switches; existing toggles get the same sliding pill.
+for(const id of ['fill-type','fill-market','fill-copy-language','template-table-type','upload-batch-type','batch-table-type','ai-provider','ai-region','inventory-table-type','filter-table-type','new-role'])selectSwitch($(id));
+for(const group of document.querySelectorAll('.segmented,.alias-modes'))slideThumb(group);

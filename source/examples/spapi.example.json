@@ -1,0 +1,6 @@
+{
+  "client_id": "amzn1.application-oa2-client.这里换成你的ClientID",
+  "client_secret": "这里换成你的ClientSecret",
+  "refresh_token": "Atzr|这里换成你的RefreshToken",
+  "seller_id": "这里换成卖家记号"
+}

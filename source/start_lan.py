@@ -14,7 +14,7 @@ def main():
     auth = Auth(data.parent / 'accounts.sqlite3')
     with auth.db() as db:
         empty = db.execute('SELECT COUNT(*) FROM users').fetchone()[0] == 0
-    print('模板仓 · 公司局域网共享版')
+    print('无敌亚马逊大王 · 公司局域网共享版')
     print('请仅在可信公司局域网使用；本模式使用 HTTP，不适合公网访问。')
     print('数据目录：' + str(data.parent))
     if empty:
