@@ -174,18 +174,20 @@ class Reports:
         with self.lock:
             while len(self.items) >= 8:
                 del self.items[next(iter(self.items))]
-            self.items[report_id] = {'kind': kind, 'label': label, 'marketplace': marketplace, 'table': None}
+            self.items[report_id] = {'kind': kind, 'label': label, 'marketplace': marketplace, 'table': None, 'store': getattr(client, 'store_id', spapi.DEFAULT_STORE), 'store_name': getattr(client, 'label', spapi.DEFAULT_STORE_NAME)}
         return {'id': report_id, 'label': label, 'status': 'IN_QUEUE'}
 
-    def entry(self, report_id):
+    def entry(self, report_id, store=spapi.DEFAULT_STORE):
         with self.lock:
             entry = self.items.get(report_id) if isinstance(report_id, str) else None
         if entry is None:
             raise ValueError('报告不存在或已过期，请重新生成')
+        if entry.get('store', spapi.DEFAULT_STORE) != store:
+            raise ValueError('这份报告属于店铺“%s”，请切回该店铺查看' % entry.get('store_name', ''))
         return entry
 
     def get(self, client, report_id):
-        entry = self.entry(report_id)
+        entry = self.entry(report_id, getattr(client, 'store_id', spapi.DEFAULT_STORE))
         if entry['table'] is None:
             info = client.call('GET', '/reports/2021-06-30/reports/' + report_id)
             state = info.get('processingStatus', '')
@@ -201,8 +203,8 @@ class Reports:
         columns, rows = entry['table']
         return {'id': report_id, 'label': entry['label'], 'marketplace': entry['marketplace'], 'status': 'DONE', 'columns': columns, 'rows': rows[:300], 'total': len(rows)}
 
-    def download(self, report_id):
-        entry = self.entry(report_id)
+    def download(self, report_id, store=spapi.DEFAULT_STORE):
+        entry = self.entry(report_id, store)
         if entry['table'] is None:
             raise ValueError('报告尚未生成完成')
         columns, rows = entry['table']
@@ -211,7 +213,7 @@ class Reports:
         for row in [columns] + rows:
             # A leading = + - @ would make spreadsheet apps run the cell as a formula.
             writer.writerow(["'" + cell if re.match(r'[=+\-@\t\r]', cell) else cell for cell in row])
-        return ('﻿' + out.getvalue()).encode('utf-8'), '%s_%s.csv' % (entry['label'], entry['marketplace'])
+        return ('﻿' + out.getvalue()).encode('utf-8'), '%s_%s_%s.csv' % (entry['label'], entry.get('store_name', ''), entry['marketplace'])
 
 
 def parse_table(raw):
@@ -392,10 +394,10 @@ class Changes:
         if row['status'] != 'VALID' or any(i['severity'] == 'error' for i in row['issues']):
             row['error'] = '亚马逊预检未通过，不能提交'
             return row
-        row['token'] = self.hold(user, sku, marketplace, 'PATCH', path, {'marketplaceIds': market, 'issueLocale': 'en_US'}, body, [c for c in row['changes'] if not c.get('same')])
+        row['token'] = self.hold(user, sku, marketplace, 'PATCH', path, {'marketplaceIds': market, 'issueLocale': 'en_US'}, body, [c for c in row['changes'] if not c.get('same')], getattr(client, 'store_id', spapi.DEFAULT_STORE), getattr(client, 'label', spapi.DEFAULT_STORE_NAME))
         return row
 
-    def hold(self, user, sku, marketplace, method, path, query, body, changes):
+    def hold(self, user, sku, marketplace, method, path, query, body, changes, store=spapi.DEFAULT_STORE, store_name=spapi.DEFAULT_STORE_NAME):
         """Keep a request Amazon has just validated; returns the one-use token that can send it."""
         token = secrets.token_urlsafe(24)
         with self.lock:
@@ -403,11 +405,11 @@ class Changes:
             self.pending = {k: v for k, v in self.pending.items() if v['expires'] > now}
             while len(self.pending) >= 400:
                 del self.pending[next(iter(self.pending))]
-            self.pending[token] = {'user': user, 'sku': sku, 'marketplace': marketplace, 'method': method, 'path': path, 'query': query, 'body': body, 'changes': changes, 'expires': now + TOKEN_LIFE}
+            self.pending[token] = {'user': user, 'sku': sku, 'marketplace': marketplace, 'method': method, 'path': path, 'query': query, 'body': body, 'changes': changes, 'expires': now + TOKEN_LIFE, 'store': store, 'store_name': store_name}
         return token
 
-    def hold_listing(self, user, marketplace, sku, path, query, body):
-        return self.hold(user, sku, marketplace, 'PUT', path, query, body, [{'kind': 'listing', 'label': '上架商品', 'old': '', 'new': body['productType'], 'unit': ''}])
+    def hold_listing(self, user, marketplace, sku, path, query, body, store=spapi.DEFAULT_STORE, store_name=spapi.DEFAULT_STORE_NAME):
+        return self.hold(user, sku, marketplace, 'PUT', path, query, body, [{'kind': 'listing', 'label': '上架商品', 'old': '', 'new': body['productType'], 'unit': ''}], store, store_name)
 
     def claim(self, user, token, sku, take):
         with self.lock:
@@ -426,6 +428,9 @@ class Changes:
         if confirmed is not True:
             raise ValueError('请先勾选确认，再提交这一个 SKU')
         entry = self.claim(user, token, sku, take=False)
+        if entry.get('store', spapi.DEFAULT_STORE) != getattr(client, 'store_id', spapi.DEFAULT_STORE):
+            # A preview is only valid for the store it was made in.
+            raise ValueError('这条预检是在店铺“%s”下做的，请切回该店铺再提交' % entry.get('store_name', ''))
         if entry['method'] == 'PUT' and overwrite is not True:
             # A full submit replaces a listing that already exists, so look first.
             try:
@@ -437,7 +442,7 @@ class Changes:
                 summary = next(iter(existing.get('summaries') or []), {})
                 return {'needs_overwrite': True, 'sku': sku, 'title': summary.get('itemName', ''), 'asin': summary.get('asin', '')}
         entry = self.claim(user, token, sku, take=True)
-        record = {'time': stamp(datetime.datetime.now(UTC)), 'user': user, 'sku': sku, 'marketplace': entry['marketplace'], 'changes': entry['changes']}
+        record = {'time': stamp(datetime.datetime.now(UTC)), 'user': user, 'store': entry.get('store_name', ''), 'sku': sku, 'marketplace': entry['marketplace'], 'changes': entry['changes']}
         try:
             reply = client.call(entry['method'], entry['path'], entry['query'], entry['body'], live=True)
         except spapi.SpApiError as e:

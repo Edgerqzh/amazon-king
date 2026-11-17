@@ -5,11 +5,17 @@ Template columns are attribute paths such as
 they are converted mechanically to the JSON the Listings Items API expects. Nothing here
 invents a value: an empty cell is left out and a column that cannot be converted is reported.
 """
+import base64
+import datetime
+import hashlib
+import hmac
+import json
 import re
 import threading
+import time
 import urllib.parse
 
-from template_manager import processing, spapi
+from template_manager import processing, spapi, schema_utils
 
 MAX_STATUS_SKUS = 50
 MAX_PRECHECK_SKUS = 100
@@ -110,20 +116,16 @@ def parse_key(key):
 
 
 def schema_leaf(schema, path):
-    """The JSON-schema node for the value at this path, or {} when unknown."""
-    node = ((schema or {}).get('properties') or {}).get(path[0][0])
-    for name, _, _ in path[1:]:
-        if not isinstance(node, dict):
-            return {}
-        if node.get('type') == 'array' or 'items' in node:
-            node = node.get('items') or {}
-        node = (node.get('properties') or {}).get(name) if isinstance(node, dict) else None
-    return node if isinstance(node, dict) else {}
+    """Use the same bounded local reference / allOf resolution as generated fields."""
+    return schema_utils.leaf(schema, path)
 
 
 def schema_item(schema, name):
-    node = ((schema or {}).get('properties') or {}).get(name)
-    return (node.get('items') or {}) if isinstance(node, dict) else {}
+    try:
+        node = schema_utils.attribute_node(schema, name)
+        return schema_utils.Resolver(schema).resolve(node.get('items') or {}) if isinstance(node, dict) else {}
+    except schema_utils.SchemaError:
+        return {}
 
 
 def coerce(value, leaf):
@@ -160,10 +162,28 @@ def convert(values, fields, market, schema=None):
     """(product_type, attributes, skipped column labels) for one output row of the fill page."""
     by_key = {f['key']: f for f in fields}
     attributes, product_type, skipped, identifier = {}, '', [], {}
+    json_roots = set()
+    scalar_roots = {p[0][0] for k, v in values.items() if isinstance(v, str) and v.strip() and (p := parse_key(k))}
     for key, raw in values.items():
         if not isinstance(raw, str) or not raw.strip():
             continue
         field = by_key.get(key, {})
+        if key.endswith('::json'):
+            name = key[:-6]
+            if field.get('json_attribute') != name or field.get('generated_format') != schema_utils.GENERATED_FORMAT or not schema_utils.NAME.fullmatch(name):
+                raise ValueError('高级 JSON 列未由生成模板规则声明：' + key[:120])
+            try:
+                # Resolve the root container, but retain ambiguous branches for structural validation.
+                root = schema_utils.Resolver(schema).resolve(schema or {})
+                node = (root.get('properties') or {}).get(name)
+            except schema_utils.SchemaError as e:
+                raise ValueError('无法取得最新属性规则，必须重新预检') from e
+            if not isinstance(node, dict):raise ValueError('最新规则中不存在 JSON 属性：' + name)
+            if name in scalar_roots:raise ValueError('完整 JSON 与标量字段冲突：' + name)
+            value = schema_utils.strict_json(raw)
+            attributes[name] = schema_utils.validate_json_attribute(value, node, schema)
+            json_roots.add(name)
+            continue
         role = field.get('canonical', '')
         if role == 'sku' or key == '::record_action':
             continue
@@ -191,18 +211,21 @@ def convert(values, fields, market, schema=None):
                 items.append({})
             node = items[index - 1]
             for selector, chosen in selectors.items():
-                node[selector] = chosen
+                selector_path = path[:depth + 1] + [(selector, {}, None)]
+                node[selector] = coerce(chosen, schema_leaf(schema, selector_path))
     if identifier.get('product_id'):
         kind = identifier.get('product_id_type', '').casefold()
         if kind == 'asin':
+            if 'merchant_suggested_asin' in json_roots:raise ValueError('完整 JSON 与商品编码字段冲突：merchant_suggested_asin')
             attributes['merchant_suggested_asin'] = [{'value': identifier['product_id']}]
         elif kind in ('ean', 'upc', 'gtin', 'isbn', 'jan'):
+            if 'externally_assigned_product_identifier' in json_roots:raise ValueError('完整 JSON 与商品编码字段冲突：externally_assigned_product_identifier')
             attributes['externally_assigned_product_identifier'] = [{'type': kind, 'value': identifier['product_id']}]
         else:
             skipped.append('商品编码（未提供可识别的编码类型）')
     # Drop list slots that stayed empty (e.g. only bullet 1 and 3 were filled).
     for name in list(attributes):
-        if isinstance(attributes[name], list):
+        if isinstance(attributes[name], list) and name not in json_roots:
             attributes[name] = [item for item in attributes[name] if item]
             # Unknown attribute or no definition: marketplace_id is the safe default.
             item_schema = schema_item(schema, name).get('properties') or None
@@ -216,33 +239,99 @@ def convert(values, fields, market, schema=None):
 
 # --- product type definitions (cached) --------------------------------------
 class Definitions:
-    """Product type schemas, kept in memory for the life of the process."""
+    """Seller-scoped, bounded TTL cache. Generation force-refreshes strict official metadata."""
 
-    def __init__(self):
+    def __init__(self, clock=time.monotonic, ttl=600):
         self.lock = threading.Lock()
-        self.cache = {}
+        self.cache = {}  # Kept public for existing callers and tests.
+        self.clock, self.ttl = clock, ttl
+        self.cached_at = {}
 
     def schema(self, client, product_type, marketplace):
         return self.definition(client, product_type, marketplace)['schema']
 
-    def definition(self, client, product_type, marketplace):
-        key = (client.seller_id(), marketplace, product_type)
+    def search(self, client, marketplace, query, mode='keywords', search_locale='zh_CN'):
+        market = spapi.marketplace_id(marketplace)
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200 or re.search(r'[\x00-\x1f]', query):
+            raise ValueError('搜索文字须为 1–200 字，不含控制字符')
+        if mode not in ('keywords', 'item_name') or search_locale not in ('zh_CN', 'en_US'):
+            raise ValueError('搜索方式或搜索语言无效')
+        query = query.strip()
+        params = {'marketplaceIds': market, 'locale': 'en_US', 'searchLocale': search_locale}
+        if mode == 'keywords':
+            words = [word.strip() for word in re.split('[,，]', query) if word.strip()]
+            if not words:raise ValueError('请提供搜索关键词')
+            params['keywords'] = ','.join(words)
+        else:
+            params['itemName'] = query
+        reply = client.call('GET', '/definitions/2020-09-01/productTypes', params)
+        products = reply.get('productTypes') if isinstance(reply, dict) else None
+        if not isinstance(products, list):raise spapi.SpApiError('亚马逊商品类型搜索格式异常')
+        items, seen = [], set()
+        for item in products:
+            if not isinstance(item, dict):continue
+            name = item.get('name')
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Z0-9_]{1,80}', name) or name in seen:continue
+            if market not in (item.get('marketplaceIds') or []):continue
+            seen.add(name)
+            items.append({'name': name, 'display_name': str(item.get('displayName') or name)[:500]})
+        return {'marketplace': marketplace, 'query': query, 'items': items[:100], 'truncated': len(items) > 100}
+
+    def definition(self, client, product_type, marketplace, force=False, strict=False):
+        if not isinstance(product_type, str) or not re.fullmatch(r'[A-Z0-9_]{1,80}', product_type):
+            raise spapi.SpApiError('商品类型代码无效')
+        market, seller = spapi.marketplace_id(marketplace), client.seller_id()
+        key = (seller, marketplace, product_type)
         with self.lock:
-            if key in self.cache:
-                return self.cache[key]
-        if not re.fullmatch(r'[A-Z0-9_]{1,80}', product_type):
-            raise spapi.SpApiError('商品类型代码无效：' + product_type[:40])
-        meta = client.call('GET', '/definitions/2020-09-01/productTypes/' + product_type, {'marketplaceIds': spapi.marketplace_id(marketplace), 'sellerId': client.seller_id(), 'requirements': 'LISTING', 'locale': 'en_US'})
-        link = ((meta.get('schema') or {}).get('link') or {}).get('resource')
-        schema = client.fetch_document(link)
-        if not isinstance(schema, dict):
-            raise spapi.SpApiError('亚马逊字段定义格式异常')
+            hit = self.cache.get(key)
+            if not force and hit is not None and self.clock() - self.cached_at.get(key, float('-inf')) < self.ttl and (not strict or hit.get('strict_verified')):
+                return hit
+        meta = client.call('GET', '/definitions/2020-09-01/productTypes/' + product_type,
+                           {'marketplaceIds': market, 'sellerId': seller, 'productTypeVersion': 'LATEST', 'requirements': 'LISTING', 'requirementsEnforced': 'ENFORCED', 'locale': 'en_US'})
+        if not isinstance(meta, dict):raise spapi.SpApiError('亚马逊字段定义元数据格式异常')
         version = meta.get('productTypeVersion') or {}
-        result = {'schema': schema, 'version': {'number': str(version.get('number') or ''), 'latest': bool(version.get('latest'))}}
+        source = meta.get('schema') or {}
+        if not isinstance(source, dict) or not isinstance(version, dict):raise spapi.SpApiError('亚马逊规则版本或下载元数据格式异常')
+        link = source.get('link') or {}
+        if not isinstance(link, dict):raise spapi.SpApiError('亚马逊规则下载元数据格式异常')
+        checksum = source.get('checksum')
+        if strict:
+            if meta.get('productType') != product_type or meta.get('marketplaceIds') != [market] or meta.get('sellerId', seller) != seller or meta.get('requirements') != 'LISTING' or meta.get('requirementsEnforced') != 'ENFORCED':
+                raise spapi.SpApiError('亚马逊字段定义的类型、站点或要求上下文不符，未生成模板')
+            if not isinstance(version, dict) or not isinstance(version.get('number'), str) or not version['number'] or version.get('latest') is not True:
+                raise spapi.SpApiError('亚马逊未返回已确认的最新规则版本')
+            if link.get('verb') != 'GET' or not isinstance(checksum, str) or not checksum:
+                raise spapi.SpApiError('亚马逊规则缺少 GET 下载元数据或校验和')
+        resource = link.get('resource')
+        schema_hash = ''
+        if checksum is not None or strict:
+            if not isinstance(checksum, str):raise spapi.SpApiError('亚马逊规则校验和格式异常')
+            try:expected = base64.b64decode(checksum, validate=True)
+            except (ValueError, TypeError):raise spapi.SpApiError('亚马逊规则校验和格式异常') from None
+            if len(expected) != 16:raise spapi.SpApiError('亚马逊规则校验和格式异常')
+            raw = client.fetch_raw(resource)
+            if not isinstance(raw, bytes) or not hmac.compare_digest(hashlib.md5(raw).digest(), expected):
+                raise spapi.SpApiError('亚马逊规则校验和不符，未生成模板')
+            schema_hash = hashlib.sha256(raw).hexdigest()
+            try:schema = schema_utils.strict_json(raw, limit=16 * 1024 * 1024)
+            except ValueError:raise spapi.SpApiError('亚马逊字段定义不是有效的有界 JSON') from None
+        else:
+            # Legacy minimal mocks and older clients remain usable for preview, never generation.
+            schema = client.fetch_document(resource)
+            schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        if not isinstance(schema, dict):raise spapi.SpApiError('亚马逊字段定义格式异常')
+        if client.seller_id() != seller:raise spapi.SpApiError('连接卖家已变更，请重新获取规则')
+        result = {'schema': schema, 'version': {'number': str(version.get('number') or ''), 'latest': bool(version.get('latest'))},
+                  'product_type': product_type, 'display_name': str(meta.get('displayName') or product_type)[:500], 'marketplace': marketplace,
+                  'schema_sha256': schema_hash, 'checksum': checksum or '', 'fetched_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  'requirements': meta.get('requirements', ''), 'requirements_enforced': meta.get('requirementsEnforced', ''), 'strict_verified': strict}
         with self.lock:
-            if len(self.cache) >= 40:
-                del self.cache[next(iter(self.cache))]
+            if len(self.cache) >= 40 and key not in self.cache:
+                oldest = next(iter(self.cache))
+                del self.cache[oldest]
+                self.cached_at.pop(oldest, None)
             self.cache[key] = result
+            self.cached_at[key] = self.clock()
         return result
 
 
@@ -274,14 +363,21 @@ def precheck(client, definitions, rows, fields, marketplace, table_type, start=1
         if product_type:
             if product_type not in schemas:
                 try:
-                    schemas[product_type] = definitions.schema(client, product_type, marketplace)
+                    if any(f.get('generated_format') == schema_utils.GENERATED_FORMAT for f in fields):
+                        schemas[product_type] = definitions.definition(client, product_type, marketplace, force=True, strict=True)['schema']
+                    else:
+                        schemas[product_type] = definitions.schema(client, product_type, marketplace)
                 except spapi.SpApiError as e:
                     if e.status in (None, 401, 403):
                         raise
                     schemas[product_type] = None
                     notes.append('未能取得商品类型 %s 的字段定义（%s），数值和选项按原文发送，结果可能出现本可避免的格式提示' % (product_type, e))
             schema = schemas[product_type]
-        _, attributes, skipped = convert(row['values'], index.fields, market, schema)
+        try:
+            _, attributes, skipped = convert(row['values'], index.fields, market, schema)
+        except ValueError as e:
+            collector.add(sku=sku, message='属性转换失败，未发送预检：' + str(e), severity='error')
+            continue
         for label in skipped:
             skipped_fields[label] = skipped_fields.get(label, 0) + 1
         if not attributes:

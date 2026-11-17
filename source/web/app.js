@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const UI_REVISION='亚马逊接口版 1113';
+const UI_REVISION='规则生成与 API 上架版 1115';
 const TABLE_TYPES={upload:'上传表格',price_update:'改价表格'};
 ensureInventoryShopPicker();
 let templates = [];
@@ -35,9 +35,12 @@ Object.assign(PAGES,{
 });
 // Fewer, plainer page titles; several pages share one menu entry and switch with the tabs under the title.
 for(const [key,title,description] of [['library','模板库','团队保存的亚马逊原始模板。'],['import','模板库','保存新的原始模板。'],['batch','模板库','为同地区的其他店铺生成模板。'],['aliases','模板库','把不同叫法归到模板使用的标准类别。'],['check','模板库','对照亚马逊当前的字段要求。'],['inventory','库存识别','识别商品类别，拿到对应的表格。'],['fill','填写表格','把产品资料填进模板，预检后上架。'],['report','处理报告','看懂亚马逊返回的每条问题。'],['amazon','商品查询','查看店铺里商品的状态和问题。'],['ops','调价与库存','改售价和自配送库存，逐条确认后提交。'],['orders','订单','最近的订单和待发货情况。'],['sales','销售与报告','每日销售，以及可下载的报告。'],['connection','设置','与亚马逊店铺的连接。'],['shops','设置','店铺和各地区的卖家记号。'],['ai','设置','AI 服务商、模型与密钥。'],['members','设置','团队成员和权限。'],['backup','设置','备份和恢复模板库。'],['home','总览','']]){PAGES[key].title=title;PAGES[key].description=description;}
-const GROUPS={templates:['library','import','batch','aliases','check'],settings:['connection','shops','ai','members','backup']};
-const SUB_LABELS={library:'全部模板',import:'上传模板',batch:'批量生成',aliases:'叫法归类',check:'与亚马逊对照',connection:'亚马逊连接',shops:'店铺',ai:'AI',members:'成员',backup:'备份'};
+PAGES.generate={id:'generated-panel',title:'模板库',description:'按亚马逊最新字段规则生成填写表，在本软件预检并上架。',roles:['admin','editor']};
+const GROUPS={templates:['library','generate','import','batch','aliases','check'],settings:['connection','shops','ai','members','backup']};
+const SUB_LABELS={library:'全部模板',generate:'从规则生成',import:'上传模板',batch:'批量生成',aliases:'叫法归类',check:'与亚马逊对照',connection:'亚马逊连接',shops:'店铺',ai:'AI',members:'成员',backup:'备份'};
+PAGES.competitors={id:'competitors-panel',title:'竞品库',description:'从公开 BSR 榜单收集候选，核对后保存。无需连接店铺。',roles:['admin','editor','viewer']};
 const STORE_PAGES=['home','amazon','ops','orders','sales'];
+const STORE_SELECT_PAGES=[...STORE_PAGES,'fill','generate','check','connection'];
 function renderSubnav(key){
   const pages=Object.values(GROUPS).find(group=>group.includes(key)),box=$('subnav');
   const open=pages?pages.filter(page=>PAGES[page].roles.includes(currentRole)):[];box.hidden=open.length<2;
@@ -58,7 +61,7 @@ function showPage(raw=location.hash.slice(1)){
   document.querySelector('.heading h1').textContent=PAGES[key].title;
   document.querySelector('.heading p').textContent=PAGES[key].description;
   $('breadcrumb').textContent='';renderSubnav(key);{const mark=document.querySelector('aside nav a.active svg');$('page-icon').replaceChildren(...(mark?[mark.cloneNode(true)]:[]));}document.querySelector('.heading p').hidden=!PAGES[key].description;
-  $('workspace').dataset.page=key;document.title=PAGES[key].title+' · 无敌亚马逊大王';$('global-market').hidden=!STORE_PAGES.includes(key);
+  $('workspace').dataset.page=key;document.title=PAGES[key].title+' · 无敌亚马逊大王';$('global-market').hidden=!STORE_PAGES.includes(key);renderStoreSelect();
   if(key!==shownPage){replayClass(document.querySelector('.heading'),'enter');if(key==='library')replayRows();shownPage=key;}
   moveNavIndicator();
   if(key==='fill')updateFillActions();
@@ -66,6 +69,8 @@ function showPage(raw=location.hash.slice(1)){
   if(['amazon','connection','check'].includes(key))showAmazon();
   enterPage(key);
   if(key==='ops')loadOpsLog();
+  if(key==='competitors'&&typeof enterCompetitors==='function')enterCompetitors();
+  if(key==='generate'&&typeof enterGeneratedTemplates==='function')enterGeneratedTemplates();
   if(raw!==key)history.replaceState(null,'','#'+key);
 }
 window.addEventListener('hashchange',()=>{if(!$('workspace').hidden){showPage();window.scrollTo({top:0,behavior:'instant'});}});
@@ -269,7 +274,9 @@ async function enter() {
   document.querySelector('.restore-label').hidden=me.role!=='admin';
   await load();await loadAliases();
 }
-async function postJSON(url,body) {return request(url,{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify(body)});}
+let currentStore='';try{currentStore=localStorage.getItem('store')||'';}catch(e){/* storage may be unavailable */}
+function withStore(url,body){return (url.startsWith('/api/amazon/')||url.startsWith('/api/generated-templates/'))&&body&&typeof body==='object'&&!('store' in body)?{...body,store:currentStore}:body;}
+async function postJSON(url,body) {body=withStore(url,body);return request(url,{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify(body)});}
 $('login-form').addEventListener('submit',async e=>{
   e.preventDefault();const b=e.submitter;b.disabled=true;$('login-error').textContent='';
   try{await postJSON('/api/login',{username:$('username').value,password:$('password').value});$('password').value='';await enter();}catch(err){$('login-error').textContent=err.message;}finally{b.disabled=false;}
@@ -1014,22 +1021,26 @@ function updateFillActions(){
   updatePrecheckActions();
   $('fill-download-draft').disabled=busy||!canDownload;$('fill-download-strict').disabled=busy||!canDownload||fillReport?.status!=='ready';$('fill-recheck').disabled=busy||!fillReport;
 }
+function updateGeneratedFillNote(){
+  $('fill-generated-note').hidden=templates.find(t=>t.id===$('fill-template').value)?.metadata?.generated_format!=='spapi-v1';
+}
 function updateFillOptions(){
   const previous=$('fill-template').value,kind=$('fill-type').value,market=$('fill-market').value;
   const scope=templates.filter(t=>(t.table_type||'upload')===kind&&t.marketplace===market&&!t.account_scope_unknown),shops=[...new Set(scope.map(t=>t.shop||'通用模板'))].sort(),oldShop=$('fill-shop').value;
   $('fill-shop').replaceChildren(...shops.map(shop=>new Option(shop,shop)));$('fill-shop').value=shops.includes(oldShop)?oldShop:shops[0]||'';
   const choices=scope.filter(t=>(t.shop||'通用模板')===$('fill-shop').value);
-  $('fill-template').replaceChildren(new Option(choices.length?'选择原始模板':'暂无对应模板，请先上传',''),...choices.map(t=>new Option(t.category+' · '+t.version+' · '+(t.download_name||t.original_name),t.id)));
+  $('fill-template').replaceChildren(new Option(choices.length?'选择填写模板':'暂无对应模板，请先上传或从规则生成',''),...choices.map(t=>new Option(t.category+' · '+t.version+' · '+(t.download_name||t.original_name),t.id)));
   if(choices.some(t=>t.id===previous))$('fill-template').value=previous;else if(choices.length)$('fill-template').value=choices[0].id;
   if(previous!==$('fill-template').value)resetFill();
+  updateGeneratedFillNote();
   $('fill-mode-note').textContent=kind==='price_update'?'改价／库存模式：按 SKU 填写明确提供的售价、库存和对应报价字段，使用部分更新操作。标题、品牌、描述等字段不参与填写。':'新商品模式：可匹配 SKU、商品类型、标题、品牌、描述、价格、库存、颜色、尺码、图片链接和原模板其他明确字段。缺少资料会列入待核对清单。';updateFillActions();
 }
 function openFillTemplate(template){
   if(!['AE','SA'].includes(template.marketplace)){notify('当前填写支持 AE 和 SA 模板',true);return;}
-  $('fill-type').value=template.table_type||'upload';$('fill-market').value=template.marketplace;updateFillOptions();$('fill-shop').value=template.shop||'通用模板';updateFillOptions();$('fill-template').value=template.id;resetFill();updateFillActions();location.hash='fill';showPage('fill');window.scrollTo({top:0,behavior:'instant'});
+  $('fill-type').value=template.table_type||'upload';$('fill-market').value=template.marketplace;updateFillOptions();$('fill-shop').value=template.shop||'通用模板';updateFillOptions();$('fill-template').value=template.id;resetFill();updateGeneratedFillNote();updateFillActions();location.hash='fill';showPage('fill');window.scrollTo({top:0,behavior:'instant'});
 }
 for(const id of ['fill-type','fill-market','fill-shop'])$(id).addEventListener('change',()=>{resetFill();updateFillOptions();});
-$('fill-template').addEventListener('change',()=>{resetFill();updateFillActions();});
+$('fill-template').addEventListener('change',()=>{resetFill();updateGeneratedFillNote();updateFillActions();});
 for(const id of ['fill-sheet','fill-header'])$(id).addEventListener('change',()=>{resetFill();updateFillActions();});
 $('fill-replace').addEventListener('change',()=>{if(fillReport){fillDirty=true;$('fill-dirty-note').textContent='数据替换选项已变化，请重新检查。';}updateFillActions();});
 $('fill-file').addEventListener('change',async()=>{
@@ -1321,23 +1332,59 @@ $('logout').addEventListener('click',()=>{reportData=null;reportFile=null;report
 
 // Amazon SP-API: read-only SKU lookup, and a validation-only pre-check of the fill draft.
 // Credentials never reach the browser; the server only reports whether they are configured.
-let amazonStatus=null,amazonResult=null,amazonBusy=false,precheckSequence=0;
+let amazonStatus=null,amazonResult=null,amazonBusy=false,precheckSequence=0,credAdding=false;
 const LISTING_STATUS={BUYABLE:'可售',DISCOVERABLE:'可搜索到'};
 async function loadAmazonStatus(){
-  try{amazonStatus=await request('/api/amazon/status');}catch(e){amazonStatus=null;}
-  renderAmazonStatus();updatePrecheckActions();
+  try{amazonStatus=await request('/api/amazon/status?store='+encodeURIComponent(currentStore));}
+  catch(e){
+    // The remembered store may have been removed: fall back to the first store once.
+    amazonStatus=null;
+    if(currentStore){currentStore='';try{localStorage.removeItem('store');}catch(err){/* ignore */}try{amazonStatus=await request('/api/amazon/status');}catch(err){amazonStatus=null;}}
+  }
+  if(amazonStatus&&amazonStatus.store!==currentStore&&!(currentStore===''&&amazonStatus.store==='default'))currentStore=amazonStatus.store;
+  renderAmazonStatus();updatePrecheckActions();renderStoreSelect();
 }
+function storeList(){return amazonStatus?.stores||[];}
+function storeName(){return amazonStatus?.name||'主店铺';}
+function renderStoreSelect(){
+  const stores=storeList(),select=$('global-store'),page=$('workspace').dataset.page;
+  $('global-store-wrap').hidden=stores.length<2||!STORE_SELECT_PAGES.includes(page);
+  select.replaceChildren(...stores.map(s=>{const option=document.createElement('option');option.value=s.store;option.textContent=s.name+(s.configured?'':'（未配置）');return option;}));
+  select.value=amazonStatus?.store||'default';
+}
+async function setStore(store){
+  currentStore=store==='default'?'':store;try{if(currentStore)localStorage.setItem('store',currentStore);else localStorage.removeItem('store');}catch(e){/* ignore */}
+  amazonStatus=null;for(const key of Object.keys(homeCache))delete homeCache[key];
+  ordersResult=null;opsResult=null;fbaResult=null;amazonResult=null;exportId=null;
+  if(typeof resetPrecheck==='function')resetPrecheck();
+  $('amazon-markets').replaceChildren();credAdding=false;
+  await loadAmazonStatus();
+  setGlobalMarket(globalMarket,true);
+  const page=$('workspace').dataset.page;
+  for(const id of ['orders-status-text','sales-status','export-status','fba-status','ops-status'])if($(id))$(id).textContent='';
+  if(page==='orders'||page==='sales')enterPage(page);
+  if(page==='generate'&&typeof enterGeneratedTemplates==='function')enterGeneratedTemplates();
+  notify('已切换到店铺“'+storeName()+'”');
+}
+$('global-store').addEventListener('change',()=>setStore($('global-store').value));
 function renderAmazonStatus(){
-  const s=amazonStatus,ready=!!s?.configured;
-  $('amazon-state').textContent=!s?'无法读取配置状态':ready?'已配置':'尚未配置';
-  $('amazon-connection').classList.toggle('ready',ready);$('amazon-connection-icon').replaceChildren(svgIcon(ready?'check':'plug'));
-  $('amazon-connection-text').textContent=!s?'暂时无法读取接口配置状态，请稍后点“重新读取配置”。':ready?'接口凭证已配置'+(s.seller_hint?'，卖家编号 '+s.seller_hint:'')+'。支持站点：AE、SA。':'接口凭证尚未配置完整，缺少：'+s.missing.join('、')+'。'+(currentRole==='admin'?'请按下方说明在服务器本机配置。':'请联系管理员在服务器本机配置。');
-  $('amazon-connection-detail').textContent=s?[s.problem,ready?'凭证保存在：'+s.source:'',ready?'接口地区：欧洲区（含阿联酋、沙特）':'',s.plain_file&&s.in_vault?'凭证文件里还留着明文，确认连接正常后可以删掉那个文件':''].filter(Boolean).join(' · '):'';
-  const admin=currentRole==='admin';$('amazon-credentials').hidden=!admin||!s?.vault;$('cred-forget').hidden=!s?.in_vault;
-  $('amazon-credentials-title').textContent=s?.in_vault?'更换凭证':'填写亚马逊凭证';
-  $('amazon-credentials-note').textContent=s?.vault?'保存后由 '+s.vault_name+' 加密保管，只有这台电脑上当前的 Windows 账户能读取；这里不会显示已保存的内容。'+(s.in_vault?'只更换其中一项时，其余留空即可。':'')+'填写前请先停止屏幕共享。':'';
+  const s=amazonStatus,ready=!!s?.configured,admin0=currentRole==='admin';
+  $('amazon-state').textContent=!s?'无法读取配置状态':credAdding?'添加店铺':(storeList().length>1?'店铺“'+s.name+'”· ':'')+(ready?'已配置':'尚未配置');
+  $('amazon-stores').replaceChildren(...storeList().map(item=>{const chip=el('button','store-chip'+(item.configured?'':' missing'));chip.type='button';chip.setAttribute('aria-pressed',String(!credAdding&&item.store===s?.store));chip.append(el('span','',item.name),el('small','',item.configured?(item.seller_hint||'已配置'):'未配置'));chip.addEventListener('click',()=>{if(item.store!==s?.store)setStore(item.store);else if(credAdding){credAdding=false;renderAmazonStatus();}});return chip;}),
+    ...(admin0&&s?.vault&&storeList().length<(s.limit||10)?[(()=>{const add=el('button','store-chip store-add','+ 添加店铺');add.type='button';add.addEventListener('click',()=>{credAdding=true;clearCredentialFields();renderAmazonStatus();$('cred-name').focus();});return add;})()]:[]));
+  $('amazon-stores').hidden=!s;
+  $('amazon-connection').classList.toggle('ready',ready&&!credAdding);$('amazon-connection-icon').replaceChildren(svgIcon(ready&&!credAdding?'check':'plug'));
+  $('amazon-connection-text').textContent=!s?'暂时无法读取接口配置状态，请稍后点“重新读取配置”。':credAdding?'添加一个你自己的店铺：先在那个店铺的卖家后台授权应用，拿到它的 Refresh Token，再填到下面。':ready?(storeList().length>1?'店铺“'+s.name+'”的':'')+'接口凭证已配置'+(s.seller_hint?'，卖家编号 '+s.seller_hint:'')+'。支持站点：AE、SA。':'接口凭证尚未配置完整，缺少：'+s.missing.join('、')+'。'+(currentRole==='admin'?'请按下方说明在服务器本机配置。':'请联系管理员在服务器本机配置。');
+  $('amazon-connection-detail').textContent=s&&!credAdding?[s.problem,ready?'凭证保存在：'+s.source:'',ready?'接口地区：欧洲区（含阿联酋、沙特）':'',s.plain_file&&s.in_vault?'凭证文件里还留着明文，确认连接正常后可以删掉那个文件':''].filter(Boolean).join(' · '):'';
+  const admin=currentRole==='admin',extra=credAdding||(s&&s.store!=='default');
+  $('amazon-credentials').hidden=!admin||!s?.vault;
+  $('cred-forget').hidden=credAdding||!(s?.store!=='default'||s?.in_vault);$('cred-forget').textContent=s?.store&&s.store!=='default'?'移除这个店铺':'清除已保存的凭证';
+  $('cred-cancel').hidden=!credAdding;$('cred-name').required=credAdding;$('cred-name').placeholder=credAdding?'例如：阿联酋二店':(s?.name||'');
+  $('cred-save').textContent=credAdding?'添加店铺':'保存到这台电脑';
+  $('amazon-credentials-title').textContent=credAdding?'添加店铺':s?.in_vault?'更换“'+s.name+'”的凭证或名称':'填写“'+(s?.name||'主店铺')+'”的亚马逊凭证';
+  $('amazon-credentials-note').textContent=s?.vault?'保存后由 '+s.vault_name+' 加密保管，只有这台电脑上当前的 Windows 账户能读取；这里不会显示已保存的内容。'+(s.in_vault&&!credAdding?'只更换其中一项时，其余留空即可。':'')+(extra?'如果这个店铺授权的是主店铺那个应用，Client ID 和 Client Secret 留空即可，自动沿用主店铺的。每个店铺的 Refresh Token 和卖家编号都不同，必须填这个店铺自己的。':'')+'填写前请先停止屏幕共享。':'';
   $('amazon-config-file').textContent=s?.config_file||'';
-  $('amazon-test').hidden=currentRole!=='admin';$('amazon-test').disabled=!ready||amazonBusy;$('amazon-setup').hidden=currentRole!=='admin';if(s&&!s.vault&&!ready&&admin)$('amazon-setup').open=true;
+  $('amazon-test').hidden=currentRole!=='admin'||credAdding;$('amazon-test').disabled=!ready||amazonBusy;$('amazon-setup').hidden=currentRole!=='admin';if(s&&!s.vault&&!ready&&admin)$('amazon-setup').open=true;
   $('amazon-lookup').disabled=!ready||amazonBusy;
 }
 function showAmazon(){
@@ -1419,7 +1466,7 @@ $('fill-precheck-run').addEventListener('click',async()=>{
   async function poll(){try{const state=await request('/api/inventory/progress?job_id='+encodeURIComponent(job));if(active&&state.total){progress.max=state.total;progress.value=state.completed||0;status.textContent='亚马逊正在校验 '+(state.completed||0)+' / '+state.total+' 个商品…';}}catch(e){/* the pre-check request itself reports errors */}if(active)pollTimer=setTimeout(poll,1000);}
   pollTimer=setTimeout(poll,1000);
   try{
-    const result=await sendFile('/api/fill/precheck',file,{...fillPayload(),precheck_consent:true,precheck_start:start,precheck_limit:limit,job_id:job});
+    const result=await sendFile('/api/fill/precheck',file,{...fillPayload(),precheck_consent:true,precheck_start:start,precheck_limit:limit,job_id:job,store:currentStore});
     if(revision!==fillRevision||sequence!==precheckSequence)return;
     reportData=result;reportLevel='';reportKind=null;reportTemplateChosen=false;$('report-search').value='';
     for(const other of document.querySelectorAll('#report-levels [data-level]'))other.setAttribute('aria-pressed',String(other.dataset.level===''));
@@ -1494,7 +1541,7 @@ $('ops-form').addEventListener('submit',event=>{event.preventDefault();withButto
 async function loadOpsLog(){
   try{
     const rows=await postJSON('/api/amazon/change/log',{});
-    $('ops-log').replaceChildren(...rows.map(r=>{const tr=el('tr');cell(tr,localTime(r.time));cell(tr,r.user);cell(tr,r.marketplace+' · '+r.sku);cell(tr,r.changes.map(c=>c.label+' '+(c.old===''?'未设置':c.old)+' → '+c.new).join('；'));cell(tr,r.status==='ACCEPTED'?'已接受':r.status==='FAILED'?'提交失败：'+(r.note||''):'未接受（'+r.status+'）',r.status==='ACCEPTED'?'amazon-clean':'ops-blocked');return tr;}));
+    $('ops-log').replaceChildren(...rows.map(r=>{const tr=el('tr');cell(tr,localTime(r.time));cell(tr,r.user);cell(tr,(r.store&&storeList().length>1?r.store+' · ':'')+r.marketplace+' · '+r.sku);cell(tr,r.changes.map(c=>c.label+' '+(c.old===''?'未设置':c.old)+' → '+c.new).join('；'));cell(tr,r.status==='ACCEPTED'?'已接受':r.status==='FAILED'?'提交失败：'+(r.note||''):'未接受（'+r.status+'）',r.status==='ACCEPTED'?'amazon-clean':'ops-blocked');return tr;}));
     $('ops-log-note').textContent=rows.length?'显示本次启动以来最近 50 条；完整记录保存在服务器数据目录的 amazon-changes.jsonl。':'本次启动以来还没有提交记录。';
   }catch(e){$('ops-log-note').textContent=e.message;}
 }
@@ -1572,7 +1619,7 @@ $('export-form').addEventListener('submit',async event=>{
   catch(e){$('export-status').textContent=e.message;$('export-create').disabled=false;notify(e.message,true);}
 });
 $('export-download').addEventListener('click',()=>withButton($('export-download'),'正在下载…',async()=>{
-  const response=await fetch('/api/amazon/report/download',{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify({id:exportId})});
+  const response=await fetch('/api/amazon/report/download',{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify({id:exportId,store:currentStore})});
   if(!response.ok){const error=await response.json();throw new Error(error.error||'下载失败');}
   const match=(response.headers.get('Content-Disposition')||'').match(/filename\*=UTF-8''([^;]+)/i);saveDownloadBlob(await response.blob(),match?decodeURIComponent(match[1]):'亚马逊报告.csv');
 }));
@@ -1800,18 +1847,24 @@ showFillStep(0);
 
 // Credentials are typed once on the server computer and kept by the system vault; nothing is ever shown back.
 const CRED_FIELDS={client_id:'cred-client-id',client_secret:'cred-client-secret',refresh_token:'cred-refresh-token',seller_id:'cred-seller-id'};
-function clearCredentialFields(){for(const id of Object.values(CRED_FIELDS))$(id).value='';}
+function clearCredentialFields(){for(const id of Object.values(CRED_FIELDS))$(id).value='';$('cred-name').value='';}
 $('amazon-credentials').addEventListener('submit',event=>{event.preventDefault();withButton($('cred-save'),'正在保存…',async()=>{
   const body=Object.fromEntries(Object.entries(CRED_FIELDS).map(([key,id])=>[key,$(id).value.trim()]));
-  if(!Object.values(body).some(Boolean))throw new Error('请先填写要保存的内容');
-  amazonStatus=await postJSON('/api/amazon/credentials',body);clearCredentialFields();renderAmazonStatus();updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];
-  notify(amazonStatus.configured?'凭证已保存，点“测试连接”确认能连上':'已保存，但还不完整');
+  const name=$('cred-name').value.trim();
+  if(!name&&!Object.values(body).some(Boolean))throw new Error('请先填写要保存的内容');
+  if(credAdding&&!name)throw new Error('请给这个店铺起个名字');
+  const adding=credAdding,saved=await postJSON('/api/amazon/credentials',{...body,name,store:adding?'new':currentStore});
+  clearCredentialFields();credAdding=false;
+  if(adding){await setStore(saved.store);}else{amazonStatus=saved;renderAmazonStatus();renderStoreSelect();updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];}
+  notify(saved.configured?(adding?'店铺已添加':'已保存')+'，点“测试连接”确认能连上':'已保存，但还不完整');
 });});
 $('cred-forget').addEventListener('click',()=>{
-  if(!confirm('清除这台电脑上保存的亚马逊凭证？清除后需要重新填写才能连接。'))return;
-  withButton($('cred-forget'),'正在清除…',async()=>{amazonStatus=await postJSON('/api/amazon/credentials/delete',{});clearCredentialFields();$('amazon-markets').replaceChildren();renderAmazonStatus();updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];notify('已清除保存的凭证');});
+  const extra=amazonStatus?.store&&amazonStatus.store!=='default',name=storeName();
+  if(!confirm(extra?'移除店铺“'+name+'”？这台电脑上保存的这个店铺的凭证会一起清除，亚马逊那边的授权不受影响。':'清除这台电脑上保存的“'+name+'”的亚马逊凭证？清除后需要重新填写才能连接。'))return;
+  withButton($('cred-forget'),'正在清除…',async()=>{await postJSON('/api/amazon/credentials/delete',{store:currentStore});clearCredentialFields();if(extra){await setStore('default');notify('已移除店铺“'+name+'”');}else{amazonStatus=null;$('amazon-markets').replaceChildren();await loadAmazonStatus();updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];notify('已清除保存的凭证');}});
 });
 $('logout').addEventListener('click',clearCredentialFields);
+$('cred-cancel').addEventListener('click',()=>{credAdding=false;clearCredentialFields();renderAmazonStatus();});
 
 // Two-to-three way choices become switches; existing toggles get the same sliding pill.
 for(const id of ['fill-type','fill-market','fill-copy-language','template-table-type','upload-batch-type','batch-table-type','ai-provider','ai-region','inventory-table-type','filter-table-type','new-role'])selectSwitch($(id));

@@ -72,10 +72,10 @@ class WindowsVault:
             raise ValueError('从系统凭据管理器删除失败（Windows 错误 %d）' % self.ctypes.get_last_error())
 
 
-def default():
+def default(target=TARGET):
     if sys.platform != 'win32':
         return None
     try:
-        return WindowsVault()
+        return WindowsVault(target)
     except (OSError, AttributeError):
         return None

@@ -72,7 +72,15 @@ def column_name(index):
 
 def canonical(key, label=''):
     raw=key.casefold()
+    if raw.endswith('::json'):return ''
     short=re.sub(r'\[[^\]]*\]','',raw)
+    # Match actual value leaves, not selector / language / currency sibling columns.
+    basic={'item_name':'item_name','product_description':'product_description','manufacturer':'manufacturer',
+           'model_number':'model_number','model_name':'model_name','part_number':'part_number',
+           'country_of_origin':'country_of_origin','condition_type':'condition_type','number_of_items':'number_of_items'}
+    leaf=re.fullmatch(r'([a-z0-9_]+)(?:#[1-5])?\.value',short)
+    if leaf and leaf[1] in basic:return basic[leaf[1]]
+    if re.fullmatch(r'main_product_image_locator(?:#[1-5])?\.media_location',short):return 'main_image_url'
     if raw=='::record_action':return 'update_delete'
     if short.startswith('contribution_sku'):return 'sku'
     if short.startswith('purchasable_offer') and '.our_price' in short and short.endswith('.value_with_tax'):return 'standard_price'
@@ -84,11 +92,11 @@ def canonical(key, label=''):
     if short.startswith('amzn1.volt.ca.product_id_'):return 'product_id_type' if short.endswith('_type') else 'product_id'
     base=re.split(r'[#.]',short)[0]
     roots={'product_type':'feed_product_type','brand':'brand_name','color':'color_name','size':'size_name','material':'material_type','parentage_level':'parentage','variation_theme':'variation_theme'}
-    if base in ('title_differentiation','item_highlight','item_highlights'):return 'item_highlight'
-    if base=='bullet_point':
+    if base in ('title_differentiation','item_highlight','item_highlights') and (short==base or short.endswith('.value')):return 'item_highlight'
+    if base=='bullet_point' and (short==base or short.endswith('.value')):
         number=re.search(r'#([1-5])(?:\.|$)',short)
         return 'bullet_point_'+(number[1] if number else '1')
-    if base in roots:return roots[base]
+    if base in roots and (short==base or re.fullmatch(re.escape(base)+r'(?:#[1-5])?\.'+('name' if base=='variation_theme' else 'value'),short)):return roots[base]
     for name,aliases in ALIASES.items():
         if norm(key) in aliases or norm(label) in aliases:return name
     return ''
@@ -185,6 +193,11 @@ def template_info(book,marketplace,table_type):
         required=definitions.get(key,'')
         fields.append({'key':key,'column':column_name(x),'index':x,'label':label,'canonical':name_key,'defined':key in definitions, 'required':required.casefold() in ('required','必填','是'), 'conditional':bool(re.search(r'condition|条件',required,re.I)), 'active':active and (table_type!='price_update' or (name_key in PRICE_FIELDS and not key.casefold().startswith('list_price'))),'validation':[]})
     fields.sort(key=lambda f:f['index'])
+    if info.get('generated_format') == 'spapi-v1':
+        for field in fields:
+            field['generated_format'] = info['generated']['format']
+            if field['key'] in info.get('json_attributes', {}):
+                field['json_attribute'] = info['json_attributes'][field['key']]
     if not fields or len(fields)>MAX_FIELDS or len({f['key'] for f in fields})!=len(fields):raise ValueError('模板字段为空、重复或超过 3000 列，请核对原模板')
     if len([f for f in fields if f['canonical']=='sku' and f['active']])!=1:raise ValueError('模板须包含唯一的 SKU 字段')
     for rule in root.findall('s:dataValidations/s:dataValidation',N):
@@ -211,7 +224,7 @@ def template_info(book,marketplace,table_type):
             x,_=column_index(cell.get('r'));style_cells.setdefault(x,cell.get('s'))
             has_data=has_data or bool(cells.get(cell.get('r'),'')) or cell.find('s:f',N) is not None
             formula_data=formula_data or cell.find('s:f',N) is not None
-    return {'sheet':name,'part':book.paths[name],'header_row':header,'data_row':start,'fields':fields,'product_types':declared_types(info),'prefilled':has_data,'formula_data':formula_data,'styles':style_cells,'row_style':row_style,'definition_fields':len(definitions)}
+    return {'sheet':name,'part':book.paths[name],'header_row':header,'data_row':start,'fields':fields,'product_types':declared_types(info),'prefilled':has_data,'formula_data':formula_data,'styles':style_cells,'row_style':row_style,'definition_fields':len(definitions),'generated_format':info.get('generated_format', '')}
 
 
 def source_table(data,filename,sheet=None,header_row=None):
@@ -293,11 +306,13 @@ def prepare(template_data,source_data,filename,marketplace,table_type,sheet=None
         fields=[]
         for f in tpl['fields']:
             if not f['active']:continue
-            item={k:f[k] for k in ('key','column','label','canonical','required','conditional')};item.update(source_index=selected.get(f['key']),default=defaults.get(f['key'],''),automatic=automatic.get(f['key']))
+            item={k:f[k] for k in ('key','column','label','canonical','required','conditional')}
+            item.update({k:f[k] for k in ('generated_format','json_attribute') if k in f})
+            item.update(source_index=selected.get(f['key']),default=defaults.get(f['key'],''),automatic=automatic.get(f['key']))
             options=book.options(next((v['formula1'] for v in f['validation'] if v['type']=='list'),''),tpl['product_types'][0] if len(tpl['product_types'])==1 else '') or []
             item['options']=options[:60];item['options_count']=len(options);item['options_enforced']=any(v.get('enforce') for v in f['validation'] if v['type']=='list')
             fields.append(item)
-        report.update(source={'filename':filename,'sheet':table['name'],'sheets':sheets,'header_row':header,'headers':headers,'warnings':table['warnings']},fields=fields,template={'sheet':tpl['sheet'],'data_row':tpl['data_row'],'header_row':tpl['header_row'],'prefilled':tpl['prefilled'],'product_types':tpl['product_types']},marketplace=marketplace,table_type=table_type)
+        report.update(source={'filename':filename,'sheet':table['name'],'sheets':sheets,'header_row':header,'headers':headers,'warnings':table['warnings']},fields=fields,template={'sheet':tpl['sheet'],'data_row':tpl['data_row'],'header_row':tpl['header_row'],'prefilled':tpl['prefilled'],'product_types':tpl['product_types'],'generated_format':tpl.get('generated_format','')},marketplace=marketplace,table_type=table_type)
         return book,tpl,report,output
     except Exception:book.close();raise
 
@@ -380,7 +395,7 @@ def build(book,tpl,headers,rows,mapping,defaults,marketplace,table_type,resolver
             if parent and code in OFFER_FIELDS:
                 if value:issue('warning',row,sku,f['label'],'父体不填写报价与库存；已在副本中留空')
                 data[key]='';continue
-            if code=='currency' and not value and not parent:value=MARKET_CURRENCY[marketplace];data[key]=value;derived.add(key)
+            if code=='currency' and not value and not parent and not tpl.get('generated_format'):value=MARKET_CURRENCY[marketplace];data[key]=value;derived.add(key)
             if value:
                 for rule in f['validation']:
                     if rule['type']=='list':

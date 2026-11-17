@@ -25,7 +25,7 @@ from template_manager import ai
 from template_manager import roster
 from template_manager import batch
 from template_manager import processing
-from template_manager import spapi, listings, operations, vault
+from template_manager import spapi, listings, operations, vault, competitors, generated_templates
 from template_manager.locks import LibraryLock
 
 WEB = Path(__file__).parent / 'web'
@@ -172,9 +172,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path)
         try:
             if not path.path.startswith('/api/'):
-                if path.path in ('/', '/app.js', '/style.css'):
-                    name = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path.path]
-                    mime = {'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
+                assets = {'/': ('index.html', 'text/html; charset=utf-8'),
+                          '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+                          '/competitors.js': ('competitors.js', 'text/javascript; charset=utf-8'),
+                          '/generated-templates.js': ('generated-templates.js', 'text/javascript; charset=utf-8'),
+                          '/style.css': ('style.css', 'text/css; charset=utf-8')}
+                if path.path in assets:
+                    name, mime = assets[path.path]
                     self.send((WEB / name).read_bytes(), mime=mime)
                 else:
                     self.send({'error': '页面不存在'}, 404)
@@ -194,7 +198,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(self.server.ai.public())
                 return
             if path.path == '/api/amazon/status':
-                self.send(self.server.spapi.public())
+                store = parse_qs(path.query).get('store', [''])[0]
+                self.send({**self.spapi_client(store).public(), **self.server.spapi_stores.public()})
+                return
+            if path.path == '/api/competitors':
+                self.send(self.server.competitors.list(user, parse_qs(path.query).get('marketplace', [''])[0]))
+                return
+            if path.path in ('/api/competitors/batch', '/api/competitors/export'):
+                query = parse_qs(path.query)
+                ident = query.get('id', [''])[0]
+                if path.path.endswith('/export'):
+                    data, filename, mime = self.server.competitors.export(user, ident, query.get('format', ['csv'])[0])
+                    self.send(data, mime=mime, filename=filename)
+                else:
+                    self.send(self.server.competitors.get(user, ident))
                 return
             if path.path == '/api/shops/roster' and user['role'] != 'admin':
                 self.send({'error': '当前账号没有此操作权限'}, 403)
@@ -235,9 +252,13 @@ class Handler(BaseHTTPRequestHandler):
             return (library.verified(self.root, row),), {'mime': 'application/octet-stream', 'filename': library.download_filename(row)}
         return ({'error': '页面不存在'}, 404), {}
 
+    def spapi_client(self, store):
+        """The SP-API client of one of the seller's stores; empty means the first store."""
+        return self.server.spapi_stores.client(store if isinstance(store, str) else None)
+
     def amazon(self, body, user):
         """Store operations for admins and editors. Only change/submit alters the live store."""
-        client, name = self.server.spapi, user['username']
+        client, name = self.spapi_client(body.get('store')), user['username']
         market = body.get('marketplace', '')
         route = self.path[len('/api/amazon/'):]
         if route == 'overview':
@@ -255,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
         elif route == 'report':
             self.send(self.server.spapi_reports.get(client, body.get('id')))
         elif route == 'report/download':
-            data, filename = self.server.spapi_reports.download(body.get('id'))
+            data, filename = self.server.spapi_reports.download(body.get('id'), getattr(client, 'store_id', spapi.DEFAULT_STORE))
             self.send(data, mime='text/csv; charset=utf-8', filename=filename)
         elif route == 'template-check':
             with self.server.library_lock.shared():
@@ -301,6 +322,15 @@ class Handler(BaseHTTPRequestHandler):
                 hint = '' if kind == UPLOAD_TYPE or size <= MAX_BODY else '；如页面是旧版本，请按 Ctrl+F5 刷新后重试'
                 self.send({'error':f'文件过大或请求为空（此操作文件上限 {limit//(1024*1024)} MB）{hint}'}, 413)
                 return
+            if self.path.startswith('/api/generated-templates/') and (kind != 'application/json' or size > 64 * 1024):
+                self.discard(self.body_size())
+                self.send({'error': '规则生成请求须为 JSON，且不超过 64 KB'}, 413 if size > 64 * 1024 else 415)
+                return
+            if self.path.startswith('/api/competitors/'):
+                if kind != 'application/json' or size > 6 * 1024 * 1024:
+                    self.discard(self.body_size())
+                    self.send({'error': '竞品请求须为 JSON，且不超过 6 MB'}, 413 if size > 6 * 1024 * 1024 else 415)
+                    return
             if self.headers.get('X-Template-Request') != '1':
                 self.discard(size)
                 self.send({'error': '缺少请求校验标记'}, 403)
@@ -353,17 +383,41 @@ class Handler(BaseHTTPRequestHandler):
                 if self.server.scheme != 'https' and self.client_address[0] not in ('127.0.0.1', '::1'):
                     self.send({'error': '只能在运行本软件的电脑上保存或清除凭证，请在那台电脑上用 127.0.0.1 打开软件'}, 403)
                     return
-                if self.path.endswith('/delete'):self.server.spapi.forget()
-                else:self.server.spapi.save(body)
-                self.send(self.server.spapi.public())
+                stores = self.server.spapi_stores
+                if self.path.endswith('/delete'):
+                    stores.remove(body.get('store'))
+                    shown = stores.client().public()
+                else:
+                    shown = stores.save(body.get('store'), body.get('name'), body)
+                self.send({**shown, **stores.public()})
                 return
             if self.path == '/api/amazon/test':
                 # Read-only: lists the marketplaces this seller account sells in.
-                self.send({'marketplaces': spapi.participations(self.server.spapi), **self.server.spapi.public()})
+                client = self.spapi_client(body.get('store'))
+                self.send({'marketplaces': spapi.participations(client), **client.public()})
                 return
             if self.path == '/api/amazon/listings':
                 # Read-only lookup of existing SKUs.
-                self.send(listings.status(self.server.spapi, body.get('skus'), body.get('marketplace', '')))
+                self.send(listings.status(self.spapi_client(body.get('store')), body.get('skus'), body.get('marketplace', '')))
+                return
+            if self.path.startswith('/api/generated-templates/'):
+                action = self.path[len('/api/generated-templates/'):]
+                if action == 'artifact':
+                    content, filename, mime = self.server.generated_templates.artifact(current_user, body)
+                    self.send(content, mime=mime, filename=filename)
+                elif action in ('search', 'generate', 'save'):
+                    self.send(getattr(self.server.generated_templates, action)(current_user, body))
+                else:
+                    self.send({'error': '接口不存在'}, 404)
+                return
+            if self.path.startswith('/api/competitors/'):
+                action = self.path[len('/api/competitors/'):]
+                methods = {'start': 'start', 'choose': 'choose', 'cancel': 'cancel', 'import': 'import_html',
+                           'save': 'save', 'review': 'review', 'delete': 'delete', 'score': 'score'}
+                if action not in methods:
+                    self.send({'error': '接口不存在'}, 404)
+                else:
+                    self.send(getattr(self.server.competitors, methods[action])(current_user, body))
                 return
             if self.path.startswith('/api/amazon/'):
                 if not self.amazon(body, current_user):
@@ -481,7 +535,13 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path == '/api/fill/precheck':
                     # Validation only (mode=VALIDATION_PREVIEW): Amazon checks the rows and saves nothing.
                     if body.get('precheck_consent') is not True:raise ValueError('请先确认将所选 SKU 的填写内容发送到亚马逊做预检')
-                    self.server.spapi.require()
+                    client = self.spapi_client(body.get('store'))
+                    client.require()
+                    owner = target.get('metadata', {}).get('account_fingerprint')
+                    owner_store = self.server.spapi_stores.find(owner, roster.fingerprint) if owner else None
+                    switch = '这份模板属于已接入的店铺“%s”，请先切换到该店铺' % owner_store['name'] if owner_store else '请切换到这份模板所属的店铺'
+                    if target.get('metadata', {}).get('generated_format') == 'spapi-v1' and owner != roster.fingerprint(client.seller_id()):
+                        raise ValueError('生成表所属卖家与当前店铺“%s”的卖家不一致。%s，或重新生成；未发送预检' % (client.label, switch))
                     if not self.server.spapi_job_lock.acquire(blocking=False):
                         self.send({'error':'另一个亚马逊预检正在进行，请稍后重试'},409)
                         return
@@ -494,14 +554,14 @@ class Handler(BaseHTTPRequestHandler):
                             book, tpl, report, rows = filling.prepare(template_data, data, name, target['marketplace'], target['table_type'], **options)
                             book.close()
                         finally:self.server.fill_job_lock.release()
-                        fields = [{key:f[key] for key in ('key','label','column','canonical')} for f in tpl['fields'] if f['active']]
+                        fields = [{key:f[key] for key in ('key','label','column','canonical','generated_format','json_attribute') if key in f} for f in tpl['fields'] if f['active']]
                         def update_precheck(state):
                             if job is not None:progress.update(user,job,state)
-                        result = listings.precheck(self.server.spapi, self.server.spapi_definitions, rows, fields, target['marketplace'], target['table_type'], start=body.get('precheck_start',1), limit=body.get('precheck_limit',20), progress=update_precheck, hold=lambda sku, path, query, payload: self.server.spapi_changes.hold_listing(user, target['marketplace'], sku, path, query, payload))
+                        result = listings.precheck(client, self.server.spapi_definitions, rows, fields, target['marketplace'], target['table_type'], start=body.get('precheck_start',1), limit=body.get('precheck_limit',20), progress=update_precheck, hold=lambda sku, path, query, payload: self.server.spapi_changes.hold_listing(user, target['marketplace'], sku, path, query, payload, getattr(client, 'store_id', spapi.DEFAULT_STORE), getattr(client, 'label', spapi.DEFAULT_STORE_NAME)))
                         result['template'] = {key:target[key] for key in ('id','shop','marketplace','table_type','category','version')}
-                        seller = self.server.spapi.seller_id()
-                        if target.get('metadata',{}).get('account_fingerprint') and target['metadata']['account_fingerprint'] != roster.fingerprint(seller):
-                            result['notes'].insert(0,'注意：这份模板里的卖家记号与接口凭证的卖家编号不一致。如果它是其他店铺的模板，本次预检结果不适用于那个店铺')
+                        result['store'] = client.label
+                        if owner and owner != roster.fingerprint(client.seller_id()):
+                            result['notes'].insert(0,'注意：这份模板里的卖家记号与当前店铺“%s”的卖家编号不一致，本次预检结果不适用于模板所属店铺。%s' % (client.label, switch))
                         result['local_errors'] = report['errors']
                         self.send(result)
                     except Exception:
@@ -636,15 +696,19 @@ def create_server(data_dir, port=8765, host='127.0.0.1', allowed_hosts=None, sch
     server.auth = Auth(data_dir.parent / 'accounts.sqlite3')
     server.ai = ai.Settings(data_dir.parent / 'ai-config.json')
     server.spapi = spapi.Client(vault=vault.default())
+    # The first store is whatever server.spapi is at the moment of use (tests replace it).
+    server.spapi_stores = spapi.Stores(lambda: server.spapi, data_dir.parent / 'amazon-stores.json', vault_for=vault.default)
     server.spapi_definitions = listings.Definitions()
     server.spapi_job_lock = threading.Lock()
     server.spapi_reports = operations.Reports()
     server.spapi_changes = operations.Changes(data_dir.parent / 'amazon-changes.jsonl')
     server.library_lock = LibraryLock()
+    server.generated_templates = generated_templates.Service(server.spapi, server.spapi_definitions, data_dir, server.library_lock, resolve=lambda store: server.spapi_stores.client(store if isinstance(store, str) else None))
     server.ai_job_lock = threading.Lock()
     server.fill_job_lock = threading.Lock()
     server.ai_cache = ai.ResultCache()
     server.copy_cache = ai.ResultCache()
+    server.competitors = competitors.Service(data_dir.parent / 'competitors.sqlite3', ai_settings=server.ai)
     server.inventory_progress = InventoryProgress()
     server.allowed_hosts = set(allowed_hosts or [f'127.0.0.1:{server.server_port}', f'localhost:{server.server_port}'])
     server.scheme = scheme

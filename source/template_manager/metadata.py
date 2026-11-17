@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from .product_types import MAX_PRODUCT_TYPES, PRODUCT_TYPE_PATTERN, canonical_category
 
-PRODUCT_TYPES_VERSION = 2
+PRODUCT_TYPES_VERSION = 3
 
 N = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
 R = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
@@ -83,4 +83,45 @@ def inspect(data, include_seller=False):
                 result['field_count'] = sum(bool(value(c)) for c in row.findall('s:c', N))
             if result['data_row'] and number >= result['data_row'] and any(value(c) or c.find('s:f', N) is not None for c in row.findall('s:c', N)):
                 result['has_prefilled_data'] = True
+        if raw.get('generator') == 'spapi-fill-v1':
+            # Only this versioned format can declare advanced complete-JSON columns.
+            # Never publish the embedded schema, contributor ID or arbitrary settings extras.
+            from . import schema_utils
+            manifest_sheet = next((s for s in workbook.findall('s:sheets/s:sheet', N) if s.get('name') == schema_utils.MANIFEST_SHEET), None)
+            manifest_rel = next((r for r in parse_xml(z.read('xl/_rels/workbook.xml.rels')) if manifest_sheet is not None and r.get('Id') == manifest_sheet.get(R) and r.get('TargetMode') != 'External'), None)
+            if manifest_rel is None:raise ValueError('生成模板缺少规则清单')
+            target = manifest_rel.get('Target', '')
+            target = posixpath.normpath(target.lstrip('/') if target.startswith('/') else posixpath.join('xl', target))
+            if not target.startswith('xl/') or '..' in target.split('/') or z.getinfo(target).file_size > 32 * 1024 * 1024:
+                raise ValueError('生成模板规则清单路径或大小无效')
+            chunks = []
+            for row in parse_xml(z.read(target)).findall('s:sheetData/s:row', N):
+                cells = row.findall('s:c', N)
+                if len(cells) != 1 or cells[0].find('s:f', N) is not None:raise ValueError('生成模板规则清单格式无效')
+                chunk = value(cells[0])
+                if len(chunk) >= 30000:raise ValueError('生成模板规则清单单元格过长')
+                chunks.append(chunk)
+            encoded = ''.join(chunks).encode('utf-8')
+            if not re.fullmatch(r'[0-9a-f]{64}', raw.get('manifestSha256', '')) or hashlib.sha256(encoded).hexdigest() != raw['manifestSha256']:
+                raise ValueError('生成模板规则清单哈希不符')
+            manifest = schema_utils.strict_json(encoded, limit=24 * 1024 * 1024)
+            if not isinstance(manifest, dict) or manifest.get('format') != schema_utils.GENERATED_FORMAT or manifest.get('marketplace') != result['marketplace'] or result['product_types'] != [manifest.get('product_type')]:
+                raise ValueError('生成模板规则清单与模板来源不一致')
+            if manifest.get('schema_sha256') != raw.get('schemaSha256') or not re.fullmatch(r'[0-9a-f]{64}', raw.get('schemaSha256', '')):
+                raise ValueError('生成模板规则哈希缺失或不一致')
+            declarations = manifest.get('fields')
+            technical = [value(c) for row in sheet_xml.findall('s:sheetData/s:row', N) if int(row.get('r', '0')) == result['attribute_row'] for c in row.findall('s:c', N)]
+            if not isinstance(declarations, list) or len(declarations) > 3000 or any(not isinstance(f, dict) for f in declarations) or [f.get('key') for f in declarations] != technical:
+                raise ValueError('生成模板技术字段与规则清单不一致')
+            json_fields = {}
+            for field in declarations:
+                key, name = field.get('key'), field.get('json_attribute')
+                if name is not None:
+                    if not isinstance(name, str) or not schema_utils.NAME.fullmatch(name) or key != name + '::json':raise ValueError('生成模板 JSON 属性声明无效')
+                    if any(other != key and re.match(re.escape(name) + r'(?:\[|#|\.)', other) for other in technical):raise ValueError('生成模板 JSON 与标量字段冲突')
+                    json_fields[key] = name
+            result['generated_format'] = 'spapi-v1'
+            result['generated'] = {'format': schema_utils.GENERATED_FORMAT, 'purpose': 'software_api_listing', 'schema_sha256': raw['schemaSha256'],
+                                   'manifest_sha256': raw['manifestSha256'], 'version': str(raw.get('productTypeVersion', ''))[:160]}
+            result['json_attributes'] = json_fields
         return result

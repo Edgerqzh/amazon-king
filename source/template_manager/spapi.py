@@ -17,6 +17,7 @@ Anything else is refused.
 """
 import json
 import os
+import secrets
 from pathlib import Path
 import re
 import threading
@@ -38,6 +39,10 @@ LIVE_PATCH_PATHS = ('/attributes/purchasable_offer', '/attributes/fulfillment_av
 MIN_INTERVAL = 0.25  # under the 5 requests/second Listings Items limit
 TIMEOUT = 30
 MAX_RESPONSE = 32 * 1024 * 1024
+DEFAULT_STORE = 'default'
+DEFAULT_STORE_NAME = '主店铺'
+STORE_LIMIT = 10  # a private application can be self-authorized by at most 10 seller accounts
+SHARED_KEYS = ('client_id', 'client_secret')
 
 
 class SpApiError(ValueError):
@@ -53,8 +58,13 @@ def default_config_path(environ=None):
 
 
 class Client:
-    def __init__(self, config_path=None, environ=None, opener=None, sleep=time.sleep, clock=time.monotonic, vault=None):
-        self.environ = os.environ if environ is None else environ
+    def __init__(self, config_path=None, environ=None, opener=None, sleep=time.sleep, clock=time.monotonic, vault=None,
+                 store_id=DEFAULT_STORE, legacy=True, shared=None):
+        # store_id: which of the seller's stores this client talks to.
+        # legacy: also read environment variables and the plain file (the first store only).
+        # shared: returns the first store's Client ID/Secret, used when this store has none of its own.
+        self.store_id, self.label, self.legacy, self.shared = store_id, DEFAULT_STORE_NAME, legacy, shared
+        self.environ = (os.environ if environ is None else environ) if legacy else {}
         self.config_path = Path(config_path) if config_path else default_config_path(self.environ)
         self.opener = opener or urllib.request.urlopen
         self.sleep, self.clock = sleep, clock
@@ -72,7 +82,7 @@ class Client:
         """
         values, problem = {}, ''
         try:
-            if self.config_path.is_file():
+            if self.legacy and self.config_path.is_file():
                 if self.config_path.stat().st_size > 64 * 1024:
                     raise ValueError('too large')
                 loaded = json.loads(self.config_path.read_text(encoding='utf-8-sig'))
@@ -99,6 +109,14 @@ class Client:
                 sources.add('vault')
             elif values.get(key):
                 sources.add('file')
+        if self.shared is not None and not any(values.get(key) for key in SHARED_KEYS):
+            try:
+                common = self.shared()
+            except (OSError, ValueError):
+                common = {}
+            if all(common.get(key) for key in SHARED_KEYS):
+                values.update({key: common[key] for key in SHARED_KEYS})
+                sources.add('shared')
         return values, sources, problem
 
     def save(self, entered):
@@ -114,6 +132,11 @@ class Client:
                 raise SpApiError(LABELS[key] + ' 含有无效字符或过长')
             if value.strip():
                 current[key] = value.strip()
+        own = dict(current)
+        if self.shared is not None and not any(current.get(key) for key in SHARED_KEYS):
+            # This store uses the first store's application: only its own token and seller are kept.
+            common = self.shared()
+            current.update({key: common[key] for key in SHARED_KEYS if common.get(key)})
         missing = [LABELS[key] for key in KEYS if not current.get(key)]
         if missing:
             raise SpApiError('还缺少：' + '、'.join(missing))
@@ -125,7 +148,7 @@ class Client:
             raise SpApiError('Client Secret 看起来不对，请核对是否填反了')
         if not re.fullmatch(r'A[A-Z0-9]{5,30}', current['seller_id']):
             raise SpApiError('卖家编号应为以 A 开头的大写字母和数字（卖家后台“账户信息 → 卖家记号”）')
-        self.vault.write(current)
+        self.vault.write(own)
         with self.lock:
             self.access = None
 
@@ -143,8 +166,9 @@ class Client:
         seller = values.get('seller_id', '')
         return {
             'configured': not missing, 'missing': missing, 'problem': problem,
-            'source': ' + '.join(label for name, label in (('vault', getattr(self.vault, 'name', '系统凭据管理器')), ('env', '环境变量'), ('file', '本机凭证文件')) if name in sources),
-            'vault': self.vault is not None, 'vault_name': getattr(self.vault, 'name', ''), 'in_vault': 'vault' in sources, 'plain_file': 'file' in sources or self.config_path.is_file(),
+            'store': self.store_id, 'name': self.label, 'shared_app': 'shared' in sources,
+            'source': ' + '.join(label for name, label in (('vault', getattr(self.vault, 'name', '系统凭据管理器')), ('env', '环境变量'), ('file', '本机凭证文件'), ('shared', '沿用主店铺的应用')) if name in sources),
+            'vault': self.vault is not None, 'vault_name': getattr(self.vault, 'name', ''), 'in_vault': 'vault' in sources, 'plain_file': 'file' in sources or (self.legacy and self.config_path.is_file()),
             'config_file': str(self.config_path), 'seller_hint': '…' + seller[-4:] if len(seller) >= 8 else '',
             'endpoint': ENDPOINT, 'marketplace_ids': dict(MARKETPLACE_IDS),
         }
@@ -153,7 +177,7 @@ class Client:
         values, _, problem = self.credentials()
         missing = [LABELS[key] for key in KEYS if not values.get(key)]
         if missing:
-            raise SpApiError((problem + '；' if problem else '') + '亚马逊接口凭证尚未配置完整，缺少：' + '、'.join(missing) + '。请由管理员在服务器本机配置')
+            raise SpApiError((problem + '；' if problem else '') + '店铺“%s”的亚马逊接口凭证尚未配置完整，缺少：' % self.label + '、'.join(missing) + '。请由管理员在服务器本机配置')
         if not re.fullmatch(r'A[A-Z0-9]{5,30}', values['seller_id']):
             raise SpApiError('卖家编号格式不对：应为以 A 开头的大写字母和数字（卖家后台“账户信息 → 卖家记号”）')
         return values
@@ -281,6 +305,170 @@ class Client:
         if status != 200 or len(raw) > MAX_RESPONSE:
             raise SpApiError('下载亚马逊文档失败（HTTP %s），或文档过大' % status, status)
         return raw
+
+
+class Stores:
+    """The seller's own stores, each authorized separately; one Client per store.
+
+    The first store ("default") keeps today's setup: vault entry, environment variables or file.
+    Each further store keeps its own Refresh Token and seller ID in its own vault entry, and may
+    reuse the first store's Client ID/Secret. Names live in a small file; it holds no secrets.
+    """
+
+    def __init__(self, default, index_path, vault_for=None, **client_options):
+        self.get_default = default if callable(default) else (lambda: default)
+        self.index_path = Path(index_path)
+        self.vault_for, self.options = vault_for, client_options
+        self.lock = threading.RLock()
+        self.clients = {}
+
+    # --- index -----------------------------------------------------------
+    def entries(self):
+        rows = []
+        try:
+            if self.index_path.is_file() and self.index_path.stat().st_size <= 64 * 1024:
+                loaded = json.loads(self.index_path.read_text(encoding='utf-8-sig'))
+                rows = [row for row in (loaded.get('stores') if isinstance(loaded, dict) else None) or []
+                        if isinstance(row, dict) and isinstance(row.get('id'), str) and isinstance(row.get('name'), str)
+                        and re.fullmatch(r'default|s[0-9a-f]{8}', row['id'])]
+        except (OSError, ValueError):
+            rows = []
+        seen, unique = set(), []
+        for row in rows:
+            if row['id'] not in seen:
+                seen.add(row['id'])
+                unique.append({'id': row['id'], 'name': row['name']})
+        if DEFAULT_STORE not in seen:
+            unique.insert(0, {'id': DEFAULT_STORE, 'name': DEFAULT_STORE_NAME})
+        return unique[:STORE_LIMIT]
+
+    def write(self, rows):
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.index_path.with_name(self.index_path.name + '.tmp')
+        temporary.write_text(json.dumps({'stores': rows}, ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(temporary, self.index_path)
+
+    @staticmethod
+    def clean_name(name, rows, own=None):
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40 or re.search(r'[\x00-\x1f\x7f]', name):
+            raise SpApiError('店铺名称须为 1–40 个字')
+        name = name.strip()
+        if any(row['name'] == name and row['id'] != own for row in rows):
+            raise SpApiError('已有同名店铺：' + name)
+        return name
+
+    # --- clients ---------------------------------------------------------
+    def shared(self):
+        values = self.get_default().credentials()[0]
+        return {key: values[key] for key in SHARED_KEYS if values.get(key)}
+
+    def client(self, store=None):
+        """The Client for one store; no value means the first store."""
+        with self.lock:
+            rows = self.entries()
+            if store in (None, '', DEFAULT_STORE):
+                found = self.get_default()
+                found.label = next(row['name'] for row in rows if row['id'] == DEFAULT_STORE)
+                return found
+            row = next((row for row in rows if row['id'] == store), None) if isinstance(store, str) else None
+            if row is None:
+                raise SpApiError('所选店铺不存在，请刷新页面后重新选择店铺')
+            found = self.clients.get(store)
+            if found is None:
+                vault = self.vault_for(TARGET_PREFIX + store) if self.vault_for else None
+                found = self.clients[store] = Client(vault=vault, store_id=store, legacy=False, shared=self.shared, **self.options)
+            found.label = row['name']
+            return found
+
+    def public(self):
+        """What the browser may know about every store: names and status, never a credential."""
+        with self.lock:
+            stores = []
+            for row in self.entries():
+                shown = self.client(row['id']).public()
+                stores.append({key: shown[key] for key in ('store', 'name', 'configured', 'missing', 'problem', 'seller_hint', 'shared_app', 'source', 'in_vault')})
+            return {'stores': stores, 'limit': STORE_LIMIT}
+
+    def seller_owner(self, seller, own=None):
+        for row in self.entries():
+            if row['id'] != own and self.client(row['id']).credentials()[0].get('seller_id') == seller:
+                return row['name']
+        return None
+
+    def save(self, store, name, entered):
+        """Add a store (store is empty or 'new') or update one: its name and/or credentials."""
+        if not isinstance(entered, dict):
+            raise SpApiError('凭证格式无效')
+        typed = {key: entered.get(key).strip() for key in KEYS if isinstance(entered.get(key), str) and entered.get(key).strip()}
+        with self.lock:
+            rows = self.entries()
+            adding = store == 'new'
+            store = DEFAULT_STORE if store in (None, '') else store
+            if adding:
+                if len(rows) >= STORE_LIMIT:
+                    raise SpApiError('最多接入 %d 个店铺（亚马逊私有应用的自授权上限）' % STORE_LIMIT)
+                if self.vault_for is None or self.vault_for(TARGET_PREFIX + 'check') is None:
+                    raise SpApiError('这台电脑不支持系统凭据管理器，无法添加更多店铺')
+                store = 's' + secrets.token_hex(4)
+                rows.append({'id': store, 'name': self.clean_name(name, rows, store)})
+            else:
+                row = next((row for row in rows if row['id'] == store), None) if isinstance(store, str) else None
+                if row is None:
+                    raise SpApiError('所选店铺不存在，请刷新页面后重新选择店铺')
+                if name is not None and name != '':
+                    row['name'] = self.clean_name(name, rows, store)
+            if typed.get('seller_id'):
+                owner = self.seller_owner(typed['seller_id'], store)
+                if owner:
+                    raise SpApiError('这个卖家编号已经接在店铺“%s”下，同一个店铺不用重复添加' % owner)
+            target = self.client(store) if not adding else None
+            if adding:
+                self.clients.pop(store, None)
+                vault = self.vault_for(TARGET_PREFIX + store)
+                target = self.clients[store] = Client(vault=vault, store_id=store, legacy=False, shared=self.shared, **self.options)
+            if adding or typed:
+                try:
+                    target.save(typed)
+                except Exception:
+                    if adding:
+                        self.clients.pop(store, None)
+                    raise
+            self.write(rows)
+            return self.client(store).public()
+
+    def remove(self, store):
+        """The first store: forget its saved credentials. Any other store: remove it completely."""
+        with self.lock:
+            if store in (None, '', DEFAULT_STORE):
+                self.get_default().forget()
+                return
+            rows = self.entries()
+            if not any(row['id'] == store for row in rows):
+                raise SpApiError('所选店铺不存在，请刷新页面后重新选择店铺')
+            self.client(store).forget()
+            self.clients.pop(store, None)
+            self.write([row for row in rows if row['id'] != store])
+
+    def find(self, fingerprint, fingerprint_of):
+        """The name of the store whose seller has this fingerprint, if any."""
+        for row in self.entries():
+            try:
+                seller = self.client(row['id']).require()['seller_id']
+            except (SpApiError, AttributeError, KeyError, TypeError):
+                found = self.client(row['id'])
+                try:
+                    seller = found.seller_id()
+                except (SpApiError, AttributeError):
+                    continue
+            try:
+                if seller and fingerprint_of(seller) == fingerprint:
+                    return row
+            except ValueError:
+                continue
+        return None
+
+
+TARGET_PREFIX = 'AmazonKing/SP-API/'
 
 
 def marketplace_id(marketplace):
