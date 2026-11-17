@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ma9tVz/vLtEIKRk71ZFgrI8Zmj24uJHPtPNIAnLSsgs='; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>店铺授权结果</title>
+<style>
+:root{--ink:#1f1e1c;--muted:#6b6862;--line:#e3dfd8;--bg:#f6f4ef;--card:#fff;--accent:#b4532a;--ok:#1d6b36;--bad:#a12a1f}
+@media (prefers-color-scheme:dark){:root{--ink:#eceae5;--muted:#a7a39b;--line:#3a3833;--bg:#1c1b19;--card:#262522;--accent:#e08a5f;--ok:#7fd39a;--bad:#ff9b8f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+main{max-width:640px;margin:40px auto;padding:0 16px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+h1{font-size:20px;margin:0 0 6px}p{margin:8px 0}.muted{color:var(--muted);font-size:13.5px}
+textarea{width:100%;min-height:96px;font:13px/1.5 ui-monospace,Consolas,monospace;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);resize:vertical;word-break:break-all}
+button{margin-top:10px;padding:9px 18px;border:0;border-radius:10px;background:var(--accent);color:#fff;font:inherit;cursor:pointer}
+.ok{color:var(--ok);font-weight:600}.bad{color:var(--bad);font-weight:600}.timer{font-variant-numeric:tabular-nums}
+ol{padding-left:20px;margin:8px 0}
+</style>
+</head>
+<body>
+<main><div class="card" id="box"><h1>正在读取授权结果…</h1></div></main>
+<script>
+(function(){
+  // Only shows what Amazon put in this page's address. Nothing is sent anywhere, nothing is stored.
+  var box=document.getElementById('box'),q=new URLSearchParams(location.search);
+  function el(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=text;return n;}
+  function show(nodes){box.replaceChildren.apply(box,nodes);}
+  var code=q.get('spapi_oauth_code')||'',state=q.get('state')||'',seller=q.get('selling_partner_id')||'';
+  var clean=function(v,re){return re.test(v)?v:'';};
+  code=clean(code,/^[A-Za-z0-9_\-]{8,200}$/);state=clean(state,/^[A-Za-z0-9_\-]{8,100}$/);seller=clean(seller,/^A[A-Z0-9]{5,30}$/);
+  // Keep the one-time code out of the address bar, history and any later copy of this page's link.
+  try{history.replaceState(null,'',location.pathname);}catch(e){}
+  if(q.get('amazon_callback_uri')){
+    show([el('h1','', '请从软件里发起授权'),el('p','', '这个页面只接收授权结果。请打开“无敌亚马逊大王 → 设置 → 亚马逊连接”，点“用授权链接添加店铺”，再用软件生成的链接授权。')]);return;
+  }
+  if(q.get('error')||!code||!state||!seller){
+    show([el('h1','bad','没有拿到授权结果'),el('p','', '可能是在亚马逊页面上点了取消，或者链接不完整。请回到软件，重新生成授权链接再试一次。')]);return;
+  }
+  var text='KING1:'+state+':'+code+':'+seller;
+  var area=el('textarea');area.readOnly=true;area.value=text;area.setAttribute('aria-label','授权信息');
+  var btn=el('button','', '复制授权信息'),note=el('p','muted'),timer=el('span','timer');
+  btn.addEventListener('click',function(){area.select();var done=function(){btn.textContent='已复制';};if(navigator.clipboard)navigator.clipboard.writeText(text).then(done,function(){document.execCommand('copy');done();});else{document.execCommand('copy');done();}});
+  var left=300;function tick(){timer.textContent=Math.floor(left/60)+':'+String(left%60).padStart(2,'0');if(left>0){left--;setTimeout(tick,1000);}else{timer.textContent='已过期';timer.className='bad';}}tick();
+  var steps=el('ol');['点下面的“复制授权信息”。','回到无敌亚马逊大王，把它粘贴到“授权信息”框里，点“完成添加”。','用完关掉这个页面。'].forEach(function(s){steps.append(el('li','',s));});
+  var expiry=el('p','muted','授权信息 5 分钟内有效，只能用一次，剩余 ');expiry.append(timer);
+  note.textContent='卖家编号 '+seller+'。这串信息单独拿到没有用：没有应用的 Client Secret 换不出访问令牌。但也不要发给别人。';
+  show([el('h1','ok','亚马逊已同意授权'),steps,area,btn,expiry,note]);
+})();
+</script>
+</body>
+</html>
