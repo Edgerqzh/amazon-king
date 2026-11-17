@@ -25,7 +25,7 @@ from template_manager import ai
 from template_manager import roster
 from template_manager import batch
 from template_manager import processing
-from template_manager import spapi, listings, operations, vault, competitors, generated_templates
+from template_manager import spapi, listings, operations, vault, competitors, generated_templates, lookalike
 from template_manager.locks import LibraryLock
 
 WEB = Path(__file__).parent / 'web'
@@ -102,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Set-Cookie', cookie)
         for key, value in (extra_headers or {}).items():
             self.send_header(key, str(value))
-        self.send_header('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data: https://m.media-amazon.com https://images-na.ssl-images-amazon.com https://images-eu.ssl-images-amazon.com; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
         if filename:
             self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + quote(filename, safe=''))
         self.end_headers()
@@ -176,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                           '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
                           '/competitors.js': ('competitors.js', 'text/javascript; charset=utf-8'),
                           '/generated-templates.js': ('generated-templates.js', 'text/javascript; charset=utf-8'),
+                          '/lookalike.js': ('lookalike.js', 'text/javascript; charset=utf-8'),
+                          '/oauth.js': ('oauth.js', 'text/javascript; charset=utf-8'),
                           '/style.css': ('style.css', 'text/css; charset=utf-8')}
                 if path.path in assets:
                     name, mime = assets[path.path]
@@ -326,6 +328,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.discard(self.body_size())
                 self.send({'error': '规则生成请求须为 JSON，且不超过 64 KB'}, 413 if size > 64 * 1024 else 415)
                 return
+            if self.path.startswith('/api/lookalike/') and (kind != 'application/json' or size > 7 * 1024 * 1024):
+                self.discard(self.body_size())
+                self.send({'error': '以图找同款请求须为 JSON，图片不超过 4 MB'}, 413 if size > 7 * 1024 * 1024 else 415)
+                return
             if self.path.startswith('/api/competitors/'):
                 if kind != 'application/json' or size > 6 * 1024 * 1024:
                     self.discard(self.body_size())
@@ -349,7 +355,7 @@ class Handler(BaseHTTPRequestHandler):
                 suffix = '; Secure' if self.server.scheme == 'https' else ''
                 self.send({'ok': True}, cookie=f'session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200' + suffix)
                 return
-            roles = ('admin',) if self.path in ('/api/users', '/api/restore', '/api/ai/settings', '/api/ai/test', '/api/amazon/test', '/api/amazon/credentials', '/api/amazon/credentials/delete', '/api/shops/import', '/api/shops/preview') else ('admin', 'editor')
+            roles = ('admin',) if self.path in ('/api/users', '/api/restore', '/api/ai/settings', '/api/ai/test', '/api/amazon/test', '/api/amazon/credentials', '/api/amazon/credentials/delete', '/api/amazon/public-app', '/api/amazon/oauth/start', '/api/amazon/oauth/finish', '/api/shops/import', '/api/shops/preview') else ('admin', 'editor')
             if self.path in ('/api/logout', '/api/inventory/inspect', '/api/inventory/analyze', '/api/templates/download', '/api/processing-report', '/api/amazon/listings'):
                 roles = None
             current_user = self.identity(roles, pending=size)
@@ -378,18 +384,30 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/ai/test':
                 self.send(ai.probe(self.server.ai))
                 return
-            if self.path in ('/api/amazon/credentials', '/api/amazon/credentials/delete'):
+            if self.path in ('/api/amazon/credentials', '/api/amazon/credentials/delete', '/api/amazon/public-app', '/api/amazon/oauth/finish'):
                 # Secrets are typed only on the server computer itself, never over plain HTTP from another machine.
                 if self.server.scheme != 'https' and self.client_address[0] not in ('127.0.0.1', '::1'):
                     self.send({'error': '只能在运行本软件的电脑上保存或清除凭证，请在那台电脑上用 127.0.0.1 打开软件'}, 403)
                     return
                 stores = self.server.spapi_stores
+                if self.path == '/api/amazon/public-app':
+                    stores.save_public_app(body)
+                    self.send(stores.public())
+                    return
+                if self.path == '/api/amazon/oauth/finish':
+                    shown = stores.oauth_finish(body.get('text'))
+                    self.send({**shown, **stores.public()})
+                    return
                 if self.path.endswith('/delete'):
                     stores.remove(body.get('store'))
                     shown = stores.client().public()
                 else:
                     shown = stores.save(body.get('store'), body.get('name'), body)
                 self.send({**shown, **stores.public()})
+                return
+            if self.path == '/api/amazon/oauth/start':
+                # A consent link: whoever opens it signs in to that store on Amazon and agrees. No secret leaves this computer.
+                self.send(self.server.spapi_stores.oauth_start(body.get('name'), body.get('marketplace', 'AE'), body.get('store') or None))
                 return
             if self.path == '/api/amazon/test':
                 # Read-only: lists the marketplaces this seller account sells in.
@@ -399,6 +417,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/amazon/listings':
                 # Read-only lookup of existing SKUs.
                 self.send(listings.status(self.spapi_client(body.get('store')), body.get('skus'), body.get('marketplace', '')))
+                return
+            if self.path.startswith('/api/lookalike/'):
+                # Photo -> same product: official catalog search, AI image comparison, seller offers. Read-only.
+                action, service = self.path[len('/api/lookalike/'):], self.server.lookalike
+                if action == 'keywords':
+                    self.send(service.keywords(current_user, body))
+                elif action == 'search':
+                    self.send(service.search(current_user, self.spapi_client(body.get('store')), body))
+                elif action == 'compare':
+                    self.send(service.compare(current_user, body))
+                elif action == 'prices':
+                    self.send(service.prices(current_user, self.spapi_client(body.get('store')), self.server.spapi_stores, body))
+                else:
+                    self.send({'error': '接口不存在'}, 404)
                 return
             if self.path.startswith('/api/generated-templates/'):
                 action = self.path[len('/api/generated-templates/'):]
@@ -708,6 +740,7 @@ def create_server(data_dir, port=8765, host='127.0.0.1', allowed_hosts=None, sch
     server.fill_job_lock = threading.Lock()
     server.ai_cache = ai.ResultCache()
     server.copy_cache = ai.ResultCache()
+    server.lookalike = lookalike.Service(server.ai)
     server.competitors = competitors.Service(data_dir.parent / 'competitors.sqlite3', ai_settings=server.ai)
     server.inventory_progress = InventoryProgress()
     server.allowed_hosts = set(allowed_hosts or [f'127.0.0.1:{server.server_port}', f'localhost:{server.server_port}'])

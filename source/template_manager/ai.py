@@ -429,14 +429,23 @@ def enrich(report, tables, templates, data, filename, settings, include_images=F
     return report
 
 
-def request_json(settings, system, user, max_tokens=6000):
-    """Bounded JSON completion for reviewed product copy; never logs credentials."""
+def request_json(settings, system, user, max_tokens=6000, images=None):
+    """Bounded JSON completion; never logs credentials.
+
+    images: optional [(caption, url)] sent after the text; url is a data: URL or an https image link.
+    """
     provider_id,model,key,endpoint=settings.connection()
     if not key:raise ValueError('AI 尚未配置 API 密钥，请管理员先在 AI 设置中配置')
-    payload={'model':model,'temperature':0,'max_tokens':max_tokens,'response_format':{'type':'json_object'},'messages':[{'role':'system','content':system},{'role':'user','content':json.dumps(user,ensure_ascii=False)}]}
+    content=json.dumps(user,ensure_ascii=False)
+    if images:
+        if not PROVIDERS[provider_id]['vision']:raise ValueError('当前 AI 服务商不能看图，请在 AI 设置里换成通义千问或 OpenAI')
+        parts=[{'type':'text','text':content}]
+        for caption,url in images:parts.extend([{'type':'text','text':caption},{'type':'image_url','image_url':{'url':url}}])
+        content=parts
+    payload={'model':model,'temperature':0,'max_tokens':max_tokens,'response_format':{'type':'json_object'},'messages':[{'role':'system','content':system},{'role':'user','content':content}]}
     request=urllib.request.Request(endpoint,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+key},method='POST')
     try:
-        with urllib.request.urlopen(request,timeout=60) as response:raw=response.read(2*1024*1024+1)
+        with urllib.request.urlopen(request,timeout=120 if images else 60) as response:raw=response.read(2*1024*1024+1)
         if len(raw)>2*1024*1024:raise ValueError('AI 响应过大，未采用生成内容')
     except urllib.error.HTTPError as error:
         try:

@@ -38,9 +38,10 @@ for(const [key,title,description] of [['library','模板库','团队保存的亚
 PAGES.generate={id:'generated-panel',title:'模板库',description:'按亚马逊最新字段规则生成填写表，在本软件预检并上架。',roles:['admin','editor']};
 const GROUPS={templates:['library','generate','import','batch','aliases','check'],settings:['connection','shops','ai','members','backup']};
 const SUB_LABELS={library:'全部模板',generate:'从规则生成',import:'上传模板',batch:'批量生成',aliases:'叫法归类',check:'与亚马逊对照',connection:'亚马逊连接',shops:'店铺',ai:'AI',members:'成员',backup:'备份'};
+PAGES.lookalike={id:'lookalike-panel',title:'以图找同款',description:'上传商品图，找出亚马逊上的同款商品和各卖家的价格。',roles:['admin','editor','viewer']};
 PAGES.competitors={id:'competitors-panel',title:'竞品库',description:'从公开 BSR 榜单收集候选，核对后保存。无需连接店铺。',roles:['admin','editor','viewer']};
 const STORE_PAGES=['home','amazon','ops','orders','sales'];
-const STORE_SELECT_PAGES=[...STORE_PAGES,'fill','generate','check','connection'];
+const STORE_SELECT_PAGES=[...STORE_PAGES,'fill','generate','check','connection','lookalike'];
 function renderSubnav(key){
   const pages=Object.values(GROUPS).find(group=>group.includes(key)),box=$('subnav');
   const open=pages?pages.filter(page=>PAGES[page].roles.includes(currentRole)):[];box.hidden=open.length<2;
@@ -70,6 +71,7 @@ function showPage(raw=location.hash.slice(1)){
   enterPage(key);
   if(key==='ops')loadOpsLog();
   if(key==='competitors'&&typeof enterCompetitors==='function')enterCompetitors();
+  if(key==='lookalike'&&typeof enterLookalike==='function')enterLookalike();
   if(key==='generate'&&typeof enterGeneratedTemplates==='function')enterGeneratedTemplates();
   if(raw!==key)history.replaceState(null,'','#'+key);
 }
@@ -275,7 +277,7 @@ async function enter() {
   await load();await loadAliases();
 }
 let currentStore='';try{currentStore=localStorage.getItem('store')||'';}catch(e){/* storage may be unavailable */}
-function withStore(url,body){return (url.startsWith('/api/amazon/')||url.startsWith('/api/generated-templates/'))&&body&&typeof body==='object'&&!('store' in body)?{...body,store:currentStore}:body;}
+function withStore(url,body){return (url.startsWith('/api/amazon/')||url.startsWith('/api/generated-templates/')||url.startsWith('/api/lookalike/'))&&body&&typeof body==='object'&&!('store' in body)?{...body,store:currentStore}:body;}
 async function postJSON(url,body) {body=withStore(url,body);return request(url,{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify(body)});}
 $('login-form').addEventListener('submit',async e=>{
   e.preventDefault();const b=e.submitter;b.disabled=true;$('login-error').textContent='';
@@ -1386,7 +1388,9 @@ function renderAmazonStatus(){
   $('amazon-config-file').textContent=s?.config_file||'';
   $('amazon-test').hidden=currentRole!=='admin'||credAdding;$('amazon-test').disabled=!ready||amazonBusy;$('amazon-setup').hidden=currentRole!=='admin';if(s&&!s.vault&&!ready&&admin)$('amazon-setup').open=true;
   $('amazon-lookup').disabled=!ready||amazonBusy;
+  if(typeof window.renderOAuth==='function')window.renderOAuth();
 }
+window.amazonStatusForOAuth=()=>amazonStatus;window.currentRoleForOAuth=()=>currentRole;
 function showAmazon(){
   if(!amazonStatus)loadAmazonStatus();else renderAmazonStatus();
   $('amazon-from-draft').hidden=!(fillReport?.row_sources?.length);

@@ -43,7 +43,7 @@ class StoresTests(unittest.TestCase):
 
     def test_first_store_is_listed_and_a_new_store_reuses_its_application(self):
         listed = self.stores.public()
-        self.assertEqual([s['name'] for s in listed['stores']], ['主店铺']);self.assertEqual(listed['limit'], 10)
+        self.assertEqual([s['name'] for s in listed['stores']], ['主店铺']);self.assertEqual(listed['limit'], spapi.STORE_LIMIT)
         shown = self.add()
         self.assertTrue(shown['configured']);self.assertTrue(shown['shared_app']);self.assertEqual(shown['name'], '第二家店')
         # Only this store's own token and seller are kept for it; the application stays with the first store.
@@ -82,11 +82,11 @@ class StoresTests(unittest.TestCase):
         with self.assertRaises(spapi.SpApiError):self.stores.client('s00000000')
         with self.assertRaises(spapi.SpApiError):self.stores.client('../x')
 
-    def test_at_most_ten_stores(self):
-        for number in range(9):
+    def test_store_limit(self):
+        for number in range(spapi.STORE_LIMIT - 1):
             self.add('店%d' % number, {'refresh_token': 'Atzr|' + str(number) * 40, 'seller_id': 'ASHOP%04d' % number})
         with self.assertRaises(spapi.SpApiError) as caught:self.add('店10', {'refresh_token': 'Atzr|' + 'x' * 40, 'seller_id': 'ASHOPXXXX'})
-        self.assertIn('10', str(caught.exception))
+        self.assertIn(str(spapi.STORE_LIMIT), str(caught.exception))
 
     def test_rename_update_and_remove(self):
         store = self.add()['store']

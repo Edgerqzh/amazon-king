@@ -41,7 +41,11 @@ TIMEOUT = 30
 MAX_RESPONSE = 32 * 1024 * 1024
 DEFAULT_STORE = 'default'
 DEFAULT_STORE_NAME = '主店铺'
-STORE_LIMIT = 10  # a private application can be self-authorized by at most 10 seller accounts
+STORE_LIMIT = 25  # private apps: 10 self-authorizations per app; an unlisted public app: 25 authorizations
+PUBLIC_APP_KEYS = ('application_id', 'client_id', 'client_secret', 'redirect_uri')
+PUBLIC_APP_LABELS = {'application_id': '应用 ID（amzn1.sp.solution.…）', 'client_id': 'Client ID', 'client_secret': 'Client Secret', 'redirect_uri': '授权返回页地址'}
+CONSENT_HOSTS = {'AE': 'sellercentral.amazon.ae', 'SA': 'sellercentral.amazon.sa'}
+OAUTH_LIFE = 15 * 60
 SHARED_KEYS = ('client_id', 'client_secret')
 
 
@@ -64,6 +68,7 @@ class Client:
         # legacy: also read environment variables and the plain file (the first store only).
         # shared: returns the first store's Client ID/Secret, used when this store has none of its own.
         self.store_id, self.label, self.legacy, self.shared = store_id, DEFAULT_STORE_NAME, legacy, shared
+        self.shared_label = '沿用主店铺的应用'
         self.environ = (os.environ if environ is None else environ) if legacy else {}
         self.config_path = Path(config_path) if config_path else default_config_path(self.environ)
         self.opener = opener or urllib.request.urlopen
@@ -167,7 +172,7 @@ class Client:
         return {
             'configured': not missing, 'missing': missing, 'problem': problem,
             'store': self.store_id, 'name': self.label, 'shared_app': 'shared' in sources,
-            'source': ' + '.join(label for name, label in (('vault', getattr(self.vault, 'name', '系统凭据管理器')), ('env', '环境变量'), ('file', '本机凭证文件'), ('shared', '沿用主店铺的应用')) if name in sources),
+            'source': ' + '.join(label for name, label in (('vault', getattr(self.vault, 'name', '系统凭据管理器')), ('env', '环境变量'), ('file', '本机凭证文件'), ('shared', self.shared_label)) if name in sources),
             'vault': self.vault is not None, 'vault_name': getattr(self.vault, 'name', ''), 'in_vault': 'vault' in sources, 'plain_file': 'file' in sources or (self.legacy and self.config_path.is_file()),
             'config_file': str(self.config_path), 'seller_hint': '…' + seller[-4:] if len(seller) >= 8 else '',
             'endpoint': ENDPOINT, 'marketplace_ids': dict(MARKETPLACE_IDS),
@@ -315,12 +320,14 @@ class Stores:
     reuse the first store's Client ID/Secret. Names live in a small file; it holds no secrets.
     """
 
-    def __init__(self, default, index_path, vault_for=None, **client_options):
+    def __init__(self, default, index_path, vault_for=None, oauth_clock=time.monotonic, **client_options):
         self.get_default = default if callable(default) else (lambda: default)
         self.index_path = Path(index_path)
         self.vault_for, self.options = vault_for, client_options
         self.lock = threading.RLock()
         self.clients = {}
+        self.oauth_clock = oauth_clock
+        self.pending = {}  # OAuth state -> {'name', 'store', 'marketplace', 'expires'}
 
     # --- index -----------------------------------------------------------
     def entries(self):
@@ -337,7 +344,7 @@ class Stores:
         for row in rows:
             if row['id'] not in seen:
                 seen.add(row['id'])
-                unique.append({'id': row['id'], 'name': row['name']})
+                unique.append({'id': row['id'], 'name': row['name'], **({'app': 'public'} if row.get('app') == 'public' else {})})
         if DEFAULT_STORE not in seen:
             unique.insert(0, {'id': DEFAULT_STORE, 'name': DEFAULT_STORE_NAME})
         return unique[:STORE_LIMIT]
@@ -362,6 +369,157 @@ class Stores:
         values = self.get_default().credentials()[0]
         return {key: values[key] for key in SHARED_KEYS if values.get(key)}
 
+    # --- the public application (stores of other legal entities authorize it by link) ---
+    def app_vault(self):
+        return self.vault_for(TARGET_PREFIX + 'public-app') if self.vault_for else None
+
+    def public_app(self):
+        vault = self.app_vault()
+        try:
+            stored = vault.read() if vault is not None else {}
+        except (OSError, ValueError):
+            stored = {}
+        return {key: stored[key] for key in PUBLIC_APP_KEYS if isinstance(stored.get(key), str) and stored[key]}
+
+    def public_shared(self):
+        values = self.public_app()
+        return {key: values[key] for key in SHARED_KEYS if values.get(key)}
+
+    def public_app_status(self):
+        values = self.public_app()
+        return {'configured': all(values.get(k) for k in PUBLIC_APP_KEYS), 'application_id': values.get('application_id', ''),
+                'redirect_uri': values.get('redirect_uri', ''), 'missing': [PUBLIC_APP_LABELS[k] for k in PUBLIC_APP_KEYS if not values.get(k)]}
+
+    def save_public_app(self, entered):
+        """Store the public application's identity. A blank item keeps what is already saved."""
+        vault = self.app_vault()
+        if vault is None:
+            raise SpApiError('这台电脑不支持系统凭据管理器，无法保存公共应用')
+        if not isinstance(entered, dict):
+            raise SpApiError('公共应用设置格式无效')
+        current = self.public_app()
+        for key in PUBLIC_APP_KEYS:
+            value = entered.get(key, '')
+            if not isinstance(value, str) or len(value) > 2000 or re.search(r'[\x00-\x1f\x7f]', value.strip()):
+                raise SpApiError(PUBLIC_APP_LABELS[key] + ' 含有无效字符或过长')
+            if value.strip():
+                current[key] = value.strip()
+        missing = [PUBLIC_APP_LABELS[key] for key in PUBLIC_APP_KEYS if not current.get(key)]
+        if missing:
+            raise SpApiError('还缺少：' + '、'.join(missing))
+        if not re.fullmatch(r'amzn1\.sp\.solution\.[A-Za-z0-9-]{8,100}', current['application_id']):
+            raise SpApiError('应用 ID 应以 amzn1.sp.solution. 开头（开发者中心应用名称下面那一行），请核对是否填成了 Client ID')
+        if not current['client_id'].startswith('amzn1.application-oa2-client.'):
+            raise SpApiError('Client ID 应以 amzn1.application-oa2-client. 开头，请核对是否填反了')
+        if len(current['client_secret']) < 20 or current['client_secret'].startswith(('Atzr|', 'Atza|')):
+            raise SpApiError('Client Secret 看起来不对，请核对是否填反了')
+        parsed = urllib.parse.urlparse(current['redirect_uri'])
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.query or parsed.fragment:
+            raise SpApiError('授权返回页地址须为 https 开头的完整网址，不带 ? 参数，并且和开发者中心里填的一模一样')
+        with self.lock:
+            vault.write(current)
+            for found in self.clients.values():
+                with found.lock:
+                    found.access = None
+        return self.public_app_status()
+
+    def oauth_start(self, name, marketplace, store=None, beta=True):
+        """A consent link for one store. Whoever opens it signs in to that store and agrees."""
+        app = self.public_app()
+        if not all(app.get(k) for k in PUBLIC_APP_KEYS):
+            raise SpApiError('请先填写公共应用的设置（应用 ID、Client ID、Client Secret、授权返回页地址）')
+        if not isinstance(marketplace, str) or marketplace not in CONSENT_HOSTS:
+            raise SpApiError('授权站点只能是 AE 或 SA')
+        with self.lock:
+            rows = self.entries()
+            if store:
+                if not isinstance(store, str) or not any(row['id'] == store for row in rows):
+                    raise SpApiError('所选店铺不存在，请刷新页面后重新选择店铺')
+                if store == DEFAULT_STORE:
+                    raise SpApiError('主店铺使用自授权，不用授权链接')
+                name = next(row['name'] for row in rows if row['id'] == store)
+            else:
+                if len(rows) >= STORE_LIMIT:
+                    raise SpApiError('最多接入 %d 个店铺' % STORE_LIMIT)
+                name = self.clean_name(name, rows)
+                if any(p['name'] == name and p['expires'] > self.oauth_clock() for p in self.pending.values()):
+                    raise SpApiError('这个店铺名称已经有一个未完成的授权链接，请先完成它或换个名称')
+            now = self.oauth_clock()
+            self.pending = {k: v for k, v in self.pending.items() if v['expires'] > now}
+            while len(self.pending) >= 30:
+                del self.pending[next(iter(self.pending))]
+            state = secrets.token_urlsafe(18)
+            self.pending[state] = {'name': name, 'store': store or None, 'marketplace': marketplace, 'expires': now + OAUTH_LIFE}
+        query = {'application_id': app['application_id'], 'state': state, 'redirect_uri': app['redirect_uri']}
+        if beta:
+            query['version'] = 'beta'
+        url = 'https://' + CONSENT_HOSTS[marketplace] + '/apps/authorize/consent?' + urllib.parse.urlencode(query)
+        return {'url': url, 'name': name, 'valid_minutes': OAUTH_LIFE // 60}
+
+    @staticmethod
+    def parse_grant(text):
+        """The line the return page shows: KING1:state:code:seller."""
+        match = re.fullmatch(r'\s*KING1:([A-Za-z0-9_-]{8,100}):([A-Za-z0-9_-]{8,200}):(A[A-Z0-9]{5,30})\s*', text if isinstance(text, str) else '')
+        if not match:
+            raise SpApiError('授权信息格式不对：请在授权返回页点“复制授权信息”，整段粘贴过来')
+        return match.groups()
+
+    def oauth_finish(self, text):
+        """Exchange the one-time code for this store's Refresh Token and keep it in the vault."""
+        state, code, seller = self.parse_grant(text)
+        with self.lock:
+            pending = self.pending.pop(state, None)
+        if pending is None or pending['expires'] <= self.oauth_clock():
+            raise SpApiError('这条授权信息不是本软件刚生成的链接带回来的，或者已经超过 15 分钟。请重新生成授权链接')
+        app = self.public_app()
+        if not all(app.get(k) for k in PUBLIC_APP_KEYS):
+            raise SpApiError('公共应用的设置不完整，请先补全')
+        owner = self.seller_owner(seller, pending['store'])
+        if owner:
+            raise SpApiError('这个卖家已经接在店铺“%s”下，同一个店铺不用重复添加' % owner)
+        helper = Client(vault=None, legacy=False, **self.options)
+        form = urllib.parse.urlencode({'grant_type': 'authorization_code', 'code': code, 'redirect_uri': app['redirect_uri'],
+                                       'client_id': app['client_id'], 'client_secret': app['client_secret']}).encode()
+        status, _, raw = helper.open(urllib.request.Request(TOKEN_URL, data=form, method='POST', headers={'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'}))
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = {}
+        token = data.get('refresh_token') if isinstance(data, dict) else None
+        if status != 200 or not isinstance(token, str) or not token.startswith('Atzr|'):
+            reason = str(data.get('error_description') or data.get('error') or '') if isinstance(data, dict) else ''
+            for secret in (app['client_secret'], code):
+                reason = reason.replace(secret, '***')
+            raise SpApiError('用授权码换取 Refresh Token 失败（HTTP %s）%s。授权码 5 分钟内有效、只能用一次，请重新生成授权链接再试；也请核对授权返回页地址和开发者中心里填的完全一致' % (status, '：' + reason[:200] if reason else ''), status)
+        with self.lock:
+            rows = self.entries()
+            store = pending['store']
+            if store is None:
+                if len(rows) >= STORE_LIMIT:
+                    raise SpApiError('最多接入 %d 个店铺' % STORE_LIMIT)
+                store = 's' + secrets.token_hex(4)
+                rows.append({'id': store, 'name': self.clean_name(pending['name'], rows, store), 'app': 'public'})
+            else:
+                row = next((row for row in rows if row['id'] == store), None)
+                if row is None:
+                    raise SpApiError('所选店铺已被移除，请重新添加')
+                row['app'] = 'public'
+            vault = self.vault_for(TARGET_PREFIX + store) if self.vault_for else None
+            if vault is None:
+                raise SpApiError('这台电脑不支持系统凭据管理器，无法保存店铺凭证')
+            self.clients.pop(store, None)
+            target = self.clients[store] = Client(vault=vault, store_id=store, legacy=False, shared=self.public_shared, **self.options)
+            target.shared_label = '公共应用'
+            # A store moved to the public application keeps only its own token and seller ID.
+            target.forget()
+            try:
+                target.save({'refresh_token': token, 'seller_id': seller})
+            except Exception:
+                self.clients.pop(store, None)
+                raise
+            self.write(rows)
+            return self.client(store).public()
+
     def client(self, store=None):
         """The Client for one store; no value means the first store."""
         with self.lock:
@@ -376,7 +534,9 @@ class Stores:
             found = self.clients.get(store)
             if found is None:
                 vault = self.vault_for(TARGET_PREFIX + store) if self.vault_for else None
-                found = self.clients[store] = Client(vault=vault, store_id=store, legacy=False, shared=self.shared, **self.options)
+                found = self.clients[store] = Client(vault=vault, store_id=store, legacy=False, shared=self.public_shared if row.get('app') == 'public' else self.shared, **self.options)
+                if row.get('app') == 'public':
+                    found.shared_label = '公共应用'
             found.label = row['name']
             return found
 
@@ -386,8 +546,8 @@ class Stores:
             stores = []
             for row in self.entries():
                 shown = self.client(row['id']).public()
-                stores.append({key: shown[key] for key in ('store', 'name', 'configured', 'missing', 'problem', 'seller_hint', 'shared_app', 'source', 'in_vault')})
-            return {'stores': stores, 'limit': STORE_LIMIT}
+                stores.append({**{key: shown[key] for key in ('store', 'name', 'configured', 'missing', 'problem', 'seller_hint', 'shared_app', 'source', 'in_vault')}, 'app': row.get('app', 'private')})
+            return {'stores': stores, 'limit': STORE_LIMIT, 'public_app': self.public_app_status()}
 
     def seller_owner(self, seller, own=None):
         for row in self.entries():
@@ -406,7 +566,7 @@ class Stores:
             store = DEFAULT_STORE if store in (None, '') else store
             if adding:
                 if len(rows) >= STORE_LIMIT:
-                    raise SpApiError('最多接入 %d 个店铺（亚马逊私有应用的自授权上限）' % STORE_LIMIT)
+                    raise SpApiError('最多接入 %d 个店铺' % STORE_LIMIT)
                 if self.vault_for is None or self.vault_for(TARGET_PREFIX + 'check') is None:
                     raise SpApiError('这台电脑不支持系统凭据管理器，无法添加更多店铺')
                 store = 's' + secrets.token_hex(4)
