@@ -202,6 +202,20 @@ def images_for_rows(data, filename, sheet_name, rows):
     return images, sorted(set(warnings))
 
 
+def _json_chat_payload(provider_id, model, messages, output_limit):
+    payload = {
+        'model': model,
+        'messages': messages,
+        'response_format': {'type': 'json_object'},
+    }
+    if provider_id == 'openai' and model == 'gpt-6.1-terra':
+        # Keep the existing output budget available for the site's JSON results.
+        payload.update(max_completion_tokens=output_limit, reasoning_effort='none')
+    else:
+        payload.update(max_tokens=output_limit, temperature=0)
+    return payload
+
+
 def classify(settings, products, templates, images):
     provider_id, model, key,endpoint = settings.connection()
     if not key:
@@ -224,7 +238,11 @@ def classify(settings, products, templates, images):
             if row in images:
                 image = images[row]
                 content.extend([{'type': 'text', 'text': f'以下图片属于库存表第 {row} 行'}, {'type': 'image_url', 'image_url': {'url': 'data:'+image['mime']+';base64,'+image['data']}}])
-    payload = {'model': model, 'temperature': 0, 'max_tokens': 3000, 'response_format': {'type': 'json_object'}, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': content if provider['vision'] else text}]}
+    messages = [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': content if provider['vision'] else text},
+    ]
+    payload = _json_chat_payload(provider_id, model, messages, 3000)
     request = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+key}, method='POST')
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -442,7 +460,11 @@ def request_json(settings, system, user, max_tokens=6000, images=None):
         parts=[{'type':'text','text':content}]
         for caption,url in images:parts.extend([{'type':'text','text':caption},{'type':'image_url','image_url':{'url':url}}])
         content=parts
-    payload={'model':model,'temperature':0,'max_tokens':max_tokens,'response_format':{'type':'json_object'},'messages':[{'role':'system','content':system},{'role':'user','content':content}]}
+    messages = [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': content},
+    ]
+    payload = _json_chat_payload(provider_id, model, messages, max_tokens)
     request=urllib.request.Request(endpoint,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+key},method='POST')
     try:
         with urllib.request.urlopen(request,timeout=120 if images else 60) as response:raw=response.read(2*1024*1024+1)

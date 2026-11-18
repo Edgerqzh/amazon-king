@@ -25,7 +25,7 @@ from template_manager import ai
 from template_manager import roster
 from template_manager import batch
 from template_manager import processing
-from template_manager import spapi, listings, operations, vault, competitors, generated_templates, lookalike, lookalike_history
+from template_manager import spapi, listings, operations, vault, generated_templates, lookalike, lookalike_history
 from template_manager.locks import LibraryLock
 
 WEB = Path(__file__).parent / 'web'
@@ -174,7 +174,6 @@ class Handler(BaseHTTPRequestHandler):
             if not path.path.startswith('/api/'):
                 assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                           '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
-                          '/competitors.js': ('competitors.js', 'text/javascript; charset=utf-8'),
                           '/generated-templates.js': ('generated-templates.js', 'text/javascript; charset=utf-8'),
                           '/lookalike.js': ('lookalike.js', 'text/javascript; charset=utf-8'),
                           '/oauth.js': ('oauth.js', 'text/javascript; charset=utf-8'),
@@ -203,9 +202,6 @@ class Handler(BaseHTTPRequestHandler):
                 store = parse_qs(path.query).get('store', [''])[0]
                 self.send({**self.spapi_client(store).public(), **self.server.spapi_stores.public()})
                 return
-            if path.path == '/api/competitors':
-                self.send(self.server.competitors.list(user, parse_qs(path.query).get('marketplace', [''])[0]))
-                return
             if path.path == '/api/lookalike/history':
                 self.send(self.server.lookalike_history.list(user))
                 return
@@ -217,15 +213,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.send(data, mime=mime, filename=filename)
                 else:
                     self.send(self.server.lookalike_history.get(user, ident))
-                return
-            if path.path in ('/api/competitors/batch', '/api/competitors/export'):
-                query = parse_qs(path.query)
-                ident = query.get('id', [''])[0]
-                if path.path.endswith('/export'):
-                    data, filename, mime = self.server.competitors.export(user, ident, query.get('format', ['csv'])[0])
-                    self.send(data, mime=mime, filename=filename)
-                else:
-                    self.send(self.server.competitors.get(user, ident))
                 return
             if path.path == '/api/shops/roster' and user['role'] != 'admin':
                 self.send({'error': '当前账号没有此操作权限'}, 403)
@@ -344,11 +331,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.discard(self.body_size())
                 self.send({'error': '以图找同款请求须为 JSON，图片不超过 4 MB'}, 413 if size > 7 * 1024 * 1024 else 415)
                 return
-            if self.path.startswith('/api/competitors/'):
-                if kind != 'application/json' or size > 6 * 1024 * 1024:
-                    self.discard(self.body_size())
-                    self.send({'error': '竞品请求须为 JSON，且不超过 6 MB'}, 413 if size > 6 * 1024 * 1024 else 415)
-                    return
             if self.headers.get('X-Template-Request') != '1':
                 self.discard(size)
                 self.send({'error': '缺少请求校验标记'}, 403)
@@ -455,15 +437,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.send(getattr(self.server.generated_templates, action)(current_user, body))
                 else:
                     self.send({'error': '接口不存在'}, 404)
-                return
-            if self.path.startswith('/api/competitors/'):
-                action = self.path[len('/api/competitors/'):]
-                methods = {'start': 'start', 'choose': 'choose', 'cancel': 'cancel', 'import': 'import_html',
-                           'save': 'save', 'review': 'review', 'delete': 'delete', 'score': 'score'}
-                if action not in methods:
-                    self.send({'error': '接口不存在'}, 404)
-                else:
-                    self.send(getattr(self.server.competitors, methods[action])(current_user, body))
                 return
             if self.path.startswith('/api/amazon/'):
                 if not self.amazon(body, current_user):
@@ -756,7 +729,6 @@ def create_server(data_dir, port=8765, host='127.0.0.1', allowed_hosts=None, sch
     server.copy_cache = ai.ResultCache()
     server.lookalike = lookalike.Service(server.ai)
     server.lookalike_history = lookalike_history.History(data_dir.parent / 'lookalike.sqlite3', server.lookalike)
-    server.competitors = competitors.Service(data_dir.parent / 'competitors.sqlite3', ai_settings=server.ai)
     server.inventory_progress = InventoryProgress()
     server.allowed_hosts = set(allowed_hosts or [f'127.0.0.1:{server.server_port}', f'localhost:{server.server_port}'])
     server.scheme = scheme

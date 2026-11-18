@@ -8,7 +8,7 @@ from unittest.mock import patch
 import urllib.error
 import zipfile
 
-from template_manager import ai, inventory
+from template_manager import ai, inventory, lookalike
 from test_inventory import make_book, template
 
 
@@ -86,6 +86,30 @@ class AITests(unittest.TestCase):
         self.assertTrue(request.full_url.startswith('https://dashscope.aliyuncs.com/'))
         body = json.loads(request.data)
         self.assertEqual(body['messages'][1]['content'][-1]['type'], 'image_url')
+
+    def test_terra_connection_and_photo_identification_use_compatible_requests(self):
+        self.settings.configure('openai', 'gpt-6.1-terra', 'unit-test-not-a-real-key')
+        classification = {'row': 1, 'category': '', 'confidence': 'low', 'evidence': '', 'template_id': None}
+        photo_answer = {'keywords': ['travel bag'], 'description': '旅行包'}
+        photo_response = io.BytesIO(json.dumps({'choices': [{'message': {'content': json.dumps(photo_answer)}}]}).encode())
+        png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII='
+        with patch('urllib.request.urlopen', side_effect=[response([classification]), photo_response]) as call:
+            self.assertTrue(ai.probe(self.settings)['ok'])
+            result = lookalike.Service(self.settings).keywords(
+                {'username': 'tester', 'role': 'editor'},
+                {'marketplace': 'AE', 'image': png, 'ai_consent': True},
+            )
+        self.assertEqual(result['keywords'], ['travel bag'])
+        for request, limit in zip(call.call_args_list, (3000, 800)):
+            submitted = request.args[0]
+            self.assertEqual(submitted.full_url, 'https://api.openai.com/v1/chat/completions')
+            payload = json.loads(submitted.data)
+            self.assertEqual(payload['model'], 'gpt-6.1-terra')
+            self.assertEqual(payload['max_completion_tokens'], limit)
+            self.assertEqual(payload['reasoning_effort'], 'none')
+            self.assertNotIn('max_tokens', payload)
+            self.assertNotIn('temperature', payload)
+        self.assertEqual(payload['messages'][1]['content'][-1]['image_url']['url'], 'data:image/png;base64,' + png)
 
     def test_hallucinated_or_cross_site_template_rejected(self):
         answer = {'row': 2, 'category': '行李箱', 'confidence': 'high', 'evidence': '', 'template_id': 'SA行李箱v1'}

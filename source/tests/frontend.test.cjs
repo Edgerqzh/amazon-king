@@ -17,7 +17,7 @@ class Element{
 function browser(script){
   const nodes=new Map(),calls=[],notices=[],downloads=[];
   const $=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
-  $('workspace').hidden=true;$('comp-market').value='AE';$('look-market').value='AE';$('look-consent').checked=true;
+  $('workspace').hidden=true;$('look-market').value='AE';$('look-consent').checked=true;
   const el=(tag,cls,text)=>{const e=new Element(tag);e.className=cls;e.textContent=text||'';return e;};
   const sandbox={$,el,cell:(tr,text)=>{const td=el('td','',text);tr.append(td);return td;},currentRole:'editor',currentStore:'default',
     Option:function(text,value){this.textContent=text;this.value=value;},localTime:x=>x||'',
@@ -32,26 +32,6 @@ function browser(script){
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../web',script),'utf8'),ctx);
   return {ctx,$,calls,notices,downloads,sandbox,run:code=>vm.runInContext(code,ctx)};
 }
-
-test('all pending scoring sends 20 at a time with no overlap',async()=>{
-  const b=browser('competitors.js');let active=0,maxActive=0;const sizes=[],progress=[];
-  const completed=await b.ctx.compScoreBatches(Array.from({length:45},(_,i)=>String(i)),async batch=>{
-    active++;maxActive=Math.max(active,maxActive);sizes.push(batch.length);await Promise.resolve();active--;
-    return {ai_summary:{completed:batch.length,failed:0}};
-  },done=>progress.push(done),()=>false);
-  assert.equal(completed,45);assert.deepEqual(sizes,[20,20,5]);assert.equal(maxActive,1);assert.equal(progress.at(-1),45);
-});
-
-test('stopping scoring finishes only the current batch; partial failure stops the queue',async()=>{
-  const b=browser('competitors.js');let stop=false,calls=0;
-  const completed=await b.ctx.compScoreBatches(Array(45).fill('A'),async batch=>{
-    calls++;stop=true;return {ai_summary:{completed:batch.length,failed:0}};
-  },()=>{},()=>stop);
-  assert.equal(completed,20);assert.equal(calls,1);
-  calls=0;await assert.rejects(b.ctx.compScoreBatches(Array(45).fill('A'),async()=>{
-    calls++;return {ai_summary:{completed:19,failed:1}};
-  },()=>{},()=>false));assert.equal(calls,1);
-});
 
 test('photo queue waits for keyword confirmation, keeps results by image, and exports both',async()=>{
   const b=browser('lookalike.js');

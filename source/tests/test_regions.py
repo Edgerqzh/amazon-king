@@ -9,8 +9,7 @@ import zipfile
 from unittest.mock import patch
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from template_manager import bsr, filling, operations, spapi
-from test_bsr import card, page
+from template_manager import filling, operations, spapi
 from test_spapi import FakeAmazon, client
 from test_stores import make, SECOND
 from test_filling import template_book
@@ -60,16 +59,6 @@ class RegionTests(unittest.TestCase):
             self.assertEqual(query['granularityTimeZone'], ['America/Los_Angeles'])
             self.assertIn(offset, query['interval'][0])
             self.assertEqual(query['marketplaceIds'], ['ATVPDKIKX0DER'])
-
-    def test_us_public_bsr_and_actual_price_currency(self):
-        url = 'https://www.amazon.com/gp/bestsellers/home/123'
-        html = page(card()).replace('AED', '$')
-        parsed = bsr.parse_page(html, 'US', url)
-        self.assertEqual(parsed['items'][0]['currency'], 'USD')
-        self.assertEqual(parsed['items'][0]['price'], '1249.05')
-        self.assertTrue(parsed['items'][0]['url'].startswith('https://www.amazon.com/dp/'))
-        foreign = bsr.parse_page(html.replace('$', 'S$'), 'US', url)
-        self.assertEqual(foreign['items'][0]['currency'], '')
 
     def test_us_timezone_fallback_and_daylight_transition(self):
         fake = FakeAmazon();c = client(fake);c.region = 'NA'

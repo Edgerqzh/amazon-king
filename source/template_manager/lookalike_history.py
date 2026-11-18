@@ -5,11 +5,105 @@ from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 
-from .competitors import _identity, _id, _text, _csv_cell, _xlsx
+DENIED = '记录不存在或无权访问'
+
+
+def _text(value, cap, name='文本', empty=True):
+    if not isinstance(value, str) or len(value) > cap or (not empty and not value.strip()) or any(ord(c) < 32 and c not in '\n\r\t' for c in value):
+        raise ValueError(name + '格式无效')
+    return value.strip()
+
+
+def _identity(user, edit=False):
+    if not isinstance(user, dict):
+        raise ValueError(DENIED)
+    name, role = user.get('username'), user.get('role')
+    if not isinstance(name, str) or not name.strip() or len(name) > 200 or role not in ('admin', 'editor', 'viewer'):
+        raise ValueError(DENIED)
+    if edit and role not in ('admin', 'editor'):
+        raise ValueError(DENIED)
+    return name
+
+
+def _id(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{32}', value):
+        raise ValueError(DENIED)
+    return value
+
+
+def _csv_cell(value):
+    value = str(value)
+    return "'" + value if value.lstrip(' \t\r\n﻿').startswith(('=', '+', '-', '@')) or value.startswith(('\t', '\r', '\n')) else value
+
+
+def _xml_text(value):
+    return ''.join(c for c in str(value) if c in '\t\n\r' or 0x20 <= ord(c) <= 0xD7FF or 0xE000 <= ord(c) <= 0xFFFD or 0x10000 <= ord(c) <= 0x10FFFF)
+
+
+def _xlsx(sheets):
+    """Minimal OOXML with inline strings only; no formulas, links or remote parts."""
+    ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    relns = 'http://schemas.openxmlformats.org/package/2006/relationships'
+    docrel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    contentns = 'http://schemas.openxmlformats.org/package/2006/content-types'
+    def xml(node):
+        return ET.tostring(node, encoding='utf-8', xml_declaration=True)
+    workbook = ET.Element('workbook', xmlns=ns, attrib={'xmlns:r': docrel})
+    names = ET.SubElement(workbook, 'sheets')
+    workbook_rels = ET.Element('Relationships', xmlns=relns)
+    types = ET.Element('Types', xmlns=contentns)
+    ET.SubElement(types, 'Default', Extension='rels', ContentType='application/vnd.openxmlformats-package.relationships+xml')
+    ET.SubElement(types, 'Default', Extension='xml', ContentType='application/xml')
+    ET.SubElement(types, 'Override', PartName='/xl/workbook.xml', ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml')
+    ET.SubElement(types, 'Override', PartName='/xl/styles.xml', ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml')
+    ET.SubElement(workbook_rels, 'Relationship', Id='rIdStyles', Type=docrel + '/styles', Target='styles.xml')
+    styles = ET.Element('styleSheet', xmlns=ns)
+    fonts = ET.SubElement(styles, 'fonts', count='1')
+    font = ET.SubElement(fonts, 'font')
+    ET.SubElement(font, 'sz', val='11')
+    ET.SubElement(font, 'name', val='Arial')
+    fills = ET.SubElement(styles, 'fills', count='2')
+    for pattern in ('none', 'gray125'):
+        ET.SubElement(ET.SubElement(fills, 'fill'), 'patternFill', patternType=pattern)
+    borders = ET.SubElement(styles, 'borders', count='1')
+    ET.SubElement(borders, 'border')
+    for name in ('cellStyleXfs', 'cellXfs'):
+        ET.SubElement(ET.SubElement(styles, name, count='1'), 'xf', numFmtId='0', fontId='0', fillId='0', borderId='0')
+    ET.SubElement(ET.SubElement(styles, 'cellStyles', count='1'), 'cellStyle', name='Normal', xfId='0', builtinId='0')
+    root_rels = ET.Element('Relationships', xmlns=relns)
+    ET.SubElement(root_rels, 'Relationship', Id='rId1', Type=docrel + '/officeDocument', Target='xl/workbook.xml')
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('_rels/.rels', xml(root_rels))
+        for number, (name, rows) in enumerate(sheets, 1):
+            ET.SubElement(names, 'sheet', name=name, sheetId=str(number), attrib={'r:id': 'rId' + str(number)})
+            ET.SubElement(workbook_rels, 'Relationship', Id='rId' + str(number), Type=docrel + '/worksheet', Target='worksheets/sheet%s.xml' % number)
+            ET.SubElement(types, 'Override', PartName='/xl/worksheets/sheet%s.xml' % number, ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml')
+            sheet = ET.Element('worksheet', xmlns=ns)
+            sheet_data = ET.SubElement(sheet, 'sheetData')
+            for r, row in enumerate(rows, 1):
+                row_node = ET.SubElement(sheet_data, 'row', r=str(r))
+                for c, value in enumerate(row, 1):
+                    letter, column = '', c
+                    while column:
+                        column, remainder = divmod(column-1, 26)
+                        letter = chr(65+remainder) + letter
+                    cell = ET.SubElement(row_node, 'c', r=letter+str(r), t='inlineStr')
+                    inline = ET.SubElement(cell, 'is')
+                    ET.SubElement(inline, 't', attrib={'xml:space': 'preserve'}).text = _xml_text(value)
+            z.writestr('xl/worksheets/sheet%s.xml' % number, xml(sheet))
+        z.writestr('xl/styles.xml', xml(styles))
+        z.writestr('xl/workbook.xml', xml(workbook))
+        z.writestr('xl/_rels/workbook.xml.rels', xml(workbook_rels))
+        z.writestr('[Content_Types].xml', xml(types))
+    return stream.getvalue()
 
 
 class History:

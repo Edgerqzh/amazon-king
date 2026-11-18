@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const UI_REVISION='竞品库与多图历史版 1117';
+const UI_REVISION='多图历史版 1117';
 const TABLE_TYPES={upload:'上传表格',price_update:'改价表格'};
 ensureInventoryShopPicker();
 let templates = [];
@@ -39,7 +39,6 @@ PAGES.generate={id:'generated-panel',title:'模板库',description:'按亚马逊
 const GROUPS={templates:['library','generate','import','batch','aliases','check'],settings:['connection','shops','ai','members','backup']};
 const SUB_LABELS={library:'全部模板',generate:'从规则生成',import:'上传模板',batch:'批量生成',aliases:'叫法归类',check:'与亚马逊对照',connection:'亚马逊连接',shops:'店铺',ai:'AI',members:'成员',backup:'备份'};
 PAGES.lookalike={id:'lookalike-panel',title:'以图找同款',description:'上传商品图，找出亚马逊上的同款商品和各卖家的价格。',roles:['admin','editor','viewer']};
-PAGES.competitors={id:'competitors-panel',title:'竞品库',description:'从公开 BSR 榜单和核心词搜索页收集候选，核对后保存。无需连接店铺。',roles:['admin','editor','viewer']};
 const STORE_PAGES=['home','amazon','ops','orders','sales'];
 const STORE_SELECT_PAGES=[...STORE_PAGES,'fill','generate','check','connection','lookalike'];
 function renderSubnav(key){
@@ -70,7 +69,6 @@ function showPage(raw=location.hash.slice(1)){
   if(['amazon','connection','check'].includes(key))showAmazon();
   enterPage(key);
   if(key==='ops')loadOpsLog();
-  if(key==='competitors'&&typeof enterCompetitors==='function')enterCompetitors();
   if(key==='lookalike'&&typeof enterLookalike==='function')enterLookalike();
   if(key==='generate'&&typeof enterGeneratedTemplates==='function')enterGeneratedTemplates();
   if(raw!==key)history.replaceState(null,'','#'+key);
