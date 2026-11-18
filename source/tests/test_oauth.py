@@ -106,6 +106,21 @@ class OAuthTests(unittest.TestCase):
         query = state_of(self.stores.oauth_start('乙', 'SA')['url'])
         with self.assertRaises(spapi.SpApiError):self.stores.oauth_finish('KING1:%s:%s:AOTHER0001' % (query['state'], CODE))
 
+    def test_us_link_creates_a_north_america_store(self):
+        self.stores.save_public_app(PUBLIC)
+        started = self.stores.oauth_start('美国店', 'US')
+        self.assertTrue(started['url'].startswith('https://sellercentral.amazon.com/apps/authorize/consent?'))
+        shown = self.stores.oauth_finish('KING1:%s:%s:AUSSTORE01' % (state_of(started['url'])['state'], CODE))
+        self.assertEqual(shown['region'], 'NA');self.assertEqual(shown['endpoint'], spapi.ENDPOINTS['NA'])
+        row = next(s for s in self.stores.public()['stores'] if s['name'] == '美国店')
+        self.assertEqual((row['region'], row['app']), ('NA', 'public'))
+        # A European site cannot re-authorize a North America store.
+        with self.assertRaises(spapi.SpApiError):self.stores.oauth_start('', 'AE', store=row['store'])
+        self.assertEqual(state_of(self.stores.oauth_start('', 'US', store=row['store'])['url'])['application_id'], PUBLIC['application_id'])
+        # EU stores made by link stay in Europe.
+        _, query = self.link('阿联酋店')
+        self.assertEqual(self.stores.oauth_finish('KING1:%s:%s:AEUSTORE01' % (query['state'], CODE))['region'], 'EU')
+
     def test_reauthorize_an_existing_store(self):
         store = self.stores.save('new', '老店', {'refresh_token': 'Atzr|old-' + 'o' * 40, 'seller_id': 'AOLD00001'})['store']
         _, query = self.link(store=store)

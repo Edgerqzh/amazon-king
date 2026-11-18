@@ -27,8 +27,11 @@ import urllib.parse
 import urllib.request
 
 ENDPOINT = 'https://sellingpartnerapi-eu.amazon.com'
+ENDPOINTS = {'EU': ENDPOINT, 'NA': 'https://sellingpartnerapi-na.amazon.com'}
+REGION_LABELS = {'EU': '欧洲区（AE、SA）', 'NA': '北美区（US）'}
+MARKET_REGIONS = {'AE': 'EU', 'SA': 'EU', 'US': 'NA'}
 TOKEN_URL = 'https://api.amazon.com/auth/o2/token'
-MARKETPLACE_IDS = {'AE': 'A2VIGQ35RCS4UG', 'SA': 'A17E79C6D8DWNP'}
+MARKETPLACE_IDS = {'AE': 'A2VIGQ35RCS4UG', 'SA': 'A17E79C6D8DWNP', 'US': 'ATVPDKIKX0DER'}
 KEYS = ('client_id', 'client_secret', 'refresh_token', 'seller_id')
 LABELS = {'client_id': 'Client ID', 'client_secret': 'Client Secret', 'refresh_token': 'Refresh Token', 'seller_id': '卖家编号（Merchant Token）'}
 ENV = {key: 'SPAPI_' + key.upper() for key in KEYS}
@@ -44,7 +47,7 @@ DEFAULT_STORE_NAME = '主店铺'
 STORE_LIMIT = 25  # private apps: 10 self-authorizations per app; an unlisted public app: 25 authorizations
 PUBLIC_APP_KEYS = ('application_id', 'client_id', 'client_secret', 'redirect_uri')
 PUBLIC_APP_LABELS = {'application_id': '应用 ID（amzn1.sp.solution.…）', 'client_id': 'Client ID', 'client_secret': 'Client Secret', 'redirect_uri': '授权返回页地址'}
-CONSENT_HOSTS = {'AE': 'sellercentral.amazon.ae', 'SA': 'sellercentral.amazon.sa'}
+CONSENT_HOSTS = {'AE': 'sellercentral.amazon.ae', 'SA': 'sellercentral.amazon.sa', 'US': 'sellercentral.amazon.com'}
 OAUTH_LIFE = 15 * 60
 SHARED_KEYS = ('client_id', 'client_secret')
 
@@ -63,7 +66,7 @@ def default_config_path(environ=None):
 
 class Client:
     def __init__(self, config_path=None, environ=None, opener=None, sleep=time.sleep, clock=time.monotonic, vault=None,
-                 store_id=DEFAULT_STORE, legacy=True, shared=None):
+                 store_id=DEFAULT_STORE, legacy=True, shared=None, region='EU'):
         # store_id: which of the seller's stores this client talks to.
         # legacy: also read environment variables and the plain file (the first store only).
         # shared: returns the first store's Client ID/Secret, used when this store has none of its own.
@@ -78,6 +81,13 @@ class Client:
         self.last_call = 0.0
         self.access = None  # (token, expires_at, credential signature)
         self.vault = vault  # None: only environment variables and the file are used
+        self.region = region
+
+    @property
+    def endpoint(self):
+        if self.region not in ENDPOINTS:
+            raise SpApiError('店铺区域无效，请选择欧洲区或北美区')
+        return ENDPOINTS[self.region]
 
     # --- credentials -----------------------------------------------------
     def credentials(self):
@@ -175,7 +185,8 @@ class Client:
             'source': ' + '.join(label for name, label in (('vault', getattr(self.vault, 'name', '系统凭据管理器')), ('env', '环境变量'), ('file', '本机凭证文件'), ('shared', self.shared_label)) if name in sources),
             'vault': self.vault is not None, 'vault_name': getattr(self.vault, 'name', ''), 'in_vault': 'vault' in sources, 'plain_file': 'file' in sources or (self.legacy and self.config_path.is_file()),
             'config_file': str(self.config_path), 'seller_hint': '…' + seller[-4:] if len(seller) >= 8 else '',
-            'endpoint': ENDPOINT, 'marketplace_ids': dict(MARKETPLACE_IDS),
+            'region': self.region, 'endpoint': self.endpoint,
+            'marketplace_ids': {m: ident for m, ident in MARKETPLACE_IDS.items() if MARKET_REGIONS[m] == self.region},
         }
 
     def require(self):
@@ -253,12 +264,34 @@ class Client:
     def call(self, method, path, query=None, body=None, live=False):
         """One SP-API request. Refuses anything outside the short list in the module docstring."""
         query = dict(query or {})
+        region = self.region
+        if not isinstance(region, str) or region not in ENDPOINTS:
+            raise SpApiError('店铺区域无效，请选择欧洲区或北美区')
+        endpoint = ENDPOINTS[region]
         if not self.permitted(method, path, query, body, live):
             raise SpApiError('已拦截：这个请求不在允许范围内（只读查询、预检、生成报告，以及经确认的上架、改价／改库存）')
         if not path.startswith('/') or '..' in path or '?' in path or '#' in path:
             raise SpApiError('接口路径无效')
+        # Validate every explicit marketplace before credentials or network access.
+        def check_marketplaces(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key.lower() in ('marketplaceid', 'marketplaceids', 'marketplace_id'):
+                        entries = child if isinstance(child, list) else str(child).split(',')
+                        for ident in entries:
+                            market = next((m for m, code in MARKETPLACE_IDS.items() if code == ident), None)
+                            if market is None:
+                                raise SpApiError('接口请求包含未支持的站点编号')
+                            marketplace_id(market, region)
+                    else:
+                        check_marketplaces(child)
+            elif isinstance(value, list):
+                for child in value:
+                    check_marketplaces(child)
+        check_marketplaces(query)
+        check_marketplaces(body)
         values = self.require()
-        url = ENDPOINT + path + ('?' + urllib.parse.urlencode(query, doseq=True) if query else '')
+        url = endpoint + path + ('?' + urllib.parse.urlencode(query, doseq=True) if query else '')
         data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
         for attempt in range(4):
             headers = {'x-amz-access-token': self.token(values), 'Accept': 'application/json', 'User-Agent': 'listing-tool/1.0 (Language=Python)'}
@@ -344,9 +377,12 @@ class Stores:
         for row in rows:
             if row['id'] not in seen:
                 seen.add(row['id'])
-                unique.append({'id': row['id'], 'name': row['name'], **({'app': 'public'} if row.get('app') == 'public' else {})})
+                region = row.get('region', 'EU')
+                if region not in ENDPOINTS:
+                    raise SpApiError('店铺区域配置无效，请修正为 EU 或 NA')
+                unique.append({'id': row['id'], 'name': row['name'], 'region': region, **({'app': 'public'} if row.get('app') == 'public' else {})})
         if DEFAULT_STORE not in seen:
-            unique.insert(0, {'id': DEFAULT_STORE, 'name': DEFAULT_STORE_NAME})
+            unique.insert(0, {'id': DEFAULT_STORE, 'name': DEFAULT_STORE_NAME, 'region': 'EU'})
         return unique[:STORE_LIMIT]
 
     def write(self, rows):
@@ -429,7 +465,7 @@ class Stores:
         if not all(app.get(k) for k in PUBLIC_APP_KEYS):
             raise SpApiError('请先填写公共应用的设置（应用 ID、Client ID、Client Secret、授权返回页地址）')
         if not isinstance(marketplace, str) or marketplace not in CONSENT_HOSTS:
-            raise SpApiError('授权站点只能是 AE 或 SA')
+            raise SpApiError('授权站点只能是 AE、SA 或 US')
         with self.lock:
             rows = self.entries()
             if store:
@@ -437,7 +473,10 @@ class Stores:
                     raise SpApiError('所选店铺不存在，请刷新页面后重新选择店铺')
                 if store == DEFAULT_STORE:
                     raise SpApiError('主店铺使用自授权，不用授权链接')
-                name = next(row['name'] for row in rows if row['id'] == store)
+                row = next(row for row in rows if row['id'] == store)
+                if MARKET_REGIONS[marketplace] != row['region']:
+                    raise SpApiError('店铺“%s”属于%s，请选择同一区域的站点重新授权' % (row['name'], REGION_LABELS[row['region']]))
+                name = row['name']
             else:
                 if len(rows) >= STORE_LIMIT:
                     raise SpApiError('最多接入 %d 个店铺' % STORE_LIMIT)
@@ -498,7 +537,7 @@ class Stores:
                 if len(rows) >= STORE_LIMIT:
                     raise SpApiError('最多接入 %d 个店铺' % STORE_LIMIT)
                 store = 's' + secrets.token_hex(4)
-                rows.append({'id': store, 'name': self.clean_name(pending['name'], rows, store), 'app': 'public'})
+                rows.append({'id': store, 'name': self.clean_name(pending['name'], rows, store), 'region': MARKET_REGIONS[pending['marketplace']], 'app': 'public'})
             else:
                 row = next((row for row in rows if row['id'] == store), None)
                 if row is None:
@@ -508,7 +547,8 @@ class Stores:
             if vault is None:
                 raise SpApiError('这台电脑不支持系统凭据管理器，无法保存店铺凭证')
             self.clients.pop(store, None)
-            target = self.clients[store] = Client(vault=vault, store_id=store, legacy=False, shared=self.public_shared, **self.options)
+            region = next(row['region'] for row in rows if row['id'] == store)
+            target = self.clients[store] = Client(vault=vault, store_id=store, legacy=False, shared=self.public_shared, region=region, **self.options)
             target.shared_label = '公共应用'
             # A store moved to the public application keeps only its own token and seller ID.
             target.forget()
@@ -527,6 +567,7 @@ class Stores:
             if store in (None, '', DEFAULT_STORE):
                 found = self.get_default()
                 found.label = next(row['name'] for row in rows if row['id'] == DEFAULT_STORE)
+                found.region = next(row['region'] for row in rows if row['id'] == DEFAULT_STORE)
                 return found
             row = next((row for row in rows if row['id'] == store), None) if isinstance(store, str) else None
             if row is None:
@@ -538,6 +579,7 @@ class Stores:
                 if row.get('app') == 'public':
                     found.shared_label = '公共应用'
             found.label = row['name']
+            found.region = row['region']
             return found
 
     def public(self):
@@ -546,7 +588,7 @@ class Stores:
             stores = []
             for row in self.entries():
                 shown = self.client(row['id']).public()
-                stores.append({**{key: shown[key] for key in ('store', 'name', 'configured', 'missing', 'problem', 'seller_hint', 'shared_app', 'source', 'in_vault')}, 'app': row.get('app', 'private')})
+                stores.append({**{key: shown[key] for key in ('store', 'name', 'region', 'configured', 'missing', 'problem', 'seller_hint', 'shared_app', 'source', 'in_vault')}, 'app': row.get('app', 'private')})
             return {'stores': stores, 'limit': STORE_LIMIT, 'public_app': self.public_app_status()}
 
     def seller_owner(self, seller, own=None):
@@ -563,6 +605,9 @@ class Stores:
         with self.lock:
             rows = self.entries()
             adding = store == 'new'
+            region = entered.get('region')
+            if region is not None and (not isinstance(region, str) or region not in ENDPOINTS):
+                raise SpApiError('店铺区域无效，请选择欧洲区或北美区')
             store = DEFAULT_STORE if store in (None, '') else store
             if adding:
                 if len(rows) >= STORE_LIMIT:
@@ -570,13 +615,15 @@ class Stores:
                 if self.vault_for is None or self.vault_for(TARGET_PREFIX + 'check') is None:
                     raise SpApiError('这台电脑不支持系统凭据管理器，无法添加更多店铺')
                 store = 's' + secrets.token_hex(4)
-                rows.append({'id': store, 'name': self.clean_name(name, rows, store)})
+                rows.append({'id': store, 'name': self.clean_name(name, rows, store), 'region': region or 'EU'})
             else:
                 row = next((row for row in rows if row['id'] == store), None) if isinstance(store, str) else None
                 if row is None:
                     raise SpApiError('所选店铺不存在，请刷新页面后重新选择店铺')
                 if name is not None and name != '':
                     row['name'] = self.clean_name(name, rows, store)
+                if region is not None:
+                    row['region'] = region
             if typed.get('seller_id'):
                 owner = self.seller_owner(typed['seller_id'], store)
                 if owner:
@@ -631,9 +678,12 @@ class Stores:
 TARGET_PREFIX = 'AmazonKing/SP-API/'
 
 
-def marketplace_id(marketplace):
-    if marketplace not in MARKETPLACE_IDS:
-        raise SpApiError('亚马逊接口目前只支持 AE 和 SA 站点')
+def marketplace_id(marketplace, region=None):
+    if not isinstance(marketplace, str) or marketplace not in MARKETPLACE_IDS:
+        raise SpApiError('亚马逊接口目前只支持 AE、SA 和 US 站点')
+    if region is not None and MARKET_REGIONS[marketplace] != region:
+        raise SpApiError('%s 站点属于%s，与当前店铺的%s不一致；请切换店铺或修改店铺区域' %
+                         (marketplace, REGION_LABELS[MARKET_REGIONS[marketplace]], REGION_LABELS.get(region, '未知区域')))
     return MARKETPLACE_IDS[marketplace]
 
 

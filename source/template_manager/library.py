@@ -353,7 +353,7 @@ def run(a):
             if info.get('marketplace') and info['marketplace'] != market:
                 raise ValueError('模板内部主站点为 '+info['marketplace']+'，与所选站点不同')
             account_check(db, info, shop)
-            if info.get('marketplace') in ('AE','SA') and source_seller.startswith('A') and source_seller.isalnum():
+            if info.get('marketplace') in ('AE','SA','US') and source_seller.startswith('A') and source_seller.isalnum():
                 from .roster import apply
                 apply(db,[{'shop':shop,'marketplace':market,'fingerprint':info['account_fingerprint'],'account_hint':info['account_hint'],'seller_id':source_seller}])
             old = db.execute('SELECT * FROM templates WHERE shop=? AND marketplace=? AND category=? AND version=? AND table_type=?', (shop, market, category, version, table_type)).fetchone()

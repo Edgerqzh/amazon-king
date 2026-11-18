@@ -62,7 +62,7 @@ class LookalikeTests(unittest.TestCase):
         self.assertEqual(result['brand'], 'Pilot')
         images = sent.call_args.kwargs['images']
         self.assertTrue(images[0][1].startswith('data:image/png;base64,'))
-        for body, message in (({'marketplace': 'AE', 'image': PNG}, '同意'), ({'marketplace': 'US', 'image': PNG, 'ai_consent': True}, 'AE'),
+        for body, message in (({'marketplace': 'AE', 'image': PNG}, '同意'), ({'marketplace': 'CA', 'image': PNG, 'ai_consent': True}, 'AE'),
                               ({'marketplace': 'AE', 'image': base64.b64encode(b'GIF89a...').decode(), 'ai_consent': True}, 'JPG'),
                               ({'marketplace': 'AE', 'image': 'not base64!', 'ai_consent': True}, '图片')):
             with self.assertRaises((ValueError, spapi.SpApiError)) as caught:

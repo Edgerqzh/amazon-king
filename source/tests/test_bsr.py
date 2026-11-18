@@ -64,7 +64,7 @@ class UrlTests(unittest.TestCase):
         for url in ('http://www.amazon.ae/gp/bestsellers', 'https://www.amazon.sa/gp/bestsellers', 'https://amazon.ae.evil.test/gp/bestsellers', 'https://127.0.0.1/gp/bestsellers', 'https://[::1]/gp/bestsellers', 'https://user@amazon.ae/gp/bestsellers', 'https://amazon.ae:444/gp/bestsellers', 'https://amazon.ae/s?k=bag', 'https://amazon.ae/gp/bestsellers/../admin', 'https://amazon.ae/gp/bestsellers/%2e%2e/admin', 'https://amazon.ae/gp/bestsellers?url=https://evil.test', 'https://amazon.ae/gp/bestsellers?pg=3', 'https://amazon.ae/gp/bestsellers?pg=2&pg=1', 'https://amazon.ae/gp/bestsellers#x', 'https://amazon.ae\\@evil.test/gp/bestsellers', '//amazon.ae/gp/bestsellers', 'https://amazon.ae/gp/bestsellers\n'):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 bsr.validate_url(url, 'AE')
-        for market in (None, [], 'US', True):
+        for market in (None, [], 'CA', True):
             with self.assertRaises(ValueError):
                 bsr.validate_url(URL, market)
 

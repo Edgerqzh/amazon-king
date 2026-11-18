@@ -1,0 +1,4 @@
+America/Los_Angeles TZif data from Python tzdata 2026.6 (IANA tzdb).
+Bundled as a fallback for Windows installations without system timezone data.
+Python tzdata: Copyright (c) 2020 Paul Ganssle (Google); Copyright (c) 2026 Stan Ulbrych. Apache License 2.0, see LICENSE.
+IANA timezone data is in the public domain.

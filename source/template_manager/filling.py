@@ -52,7 +52,7 @@ COPY_FIELDS = {'item_name','item_highlight','feed_product_type'} | {'bullet_poin
 PRICE_FIELDS = {'sku','feed_product_type','update_delete','standard_price','quantity','currency','fulfillment_channel'}
 NUMERIC = {'standard_price','list_price','quantity','number_of_items'}
 OFFER_FIELDS = {'standard_price','list_price','quantity','currency','condition_type','fulfillment_channel'}
-MARKET_CURRENCY = {'AE':'AED','SA':'SAR'}
+MARKET_CURRENCY = {'AE':'AED','SA':'SAR','US':'USD'}
 
 
 def column_index(ref):
@@ -264,7 +264,7 @@ def auto_mapping(fields,headers,marketplace):
 
 
 def prepare(template_data,source_data,filename,marketplace,table_type,sheet=None,header_row=None,mapping=None,defaults=None,alias_rules=None,replace_existing=False,by_sku=None,copy_confirmed=False,copy_language='en'):
-    if marketplace not in MARKET_CURRENCY:raise ValueError('第一版填写支持 AE 和 SA 模板，请选择正确地区')
+    if marketplace not in MARKET_CURRENCY:raise ValueError('填写支持 AE、SA 和 US 模板，请选择正确地区')
     library.validate_table_type(table_type)
     if type(replace_existing) is not bool:raise ValueError('替换数据选项无效')
     book=Workbook(template_data)
@@ -417,7 +417,7 @@ def build(book,tpl,headers,rows,mapping,defaults,marketplace,table_type,resolver
                     except InvalidOperation:
                         data[key]=''
                         issue('error',row,sku,f['label'],'无效数字未写入；请提供非负整数数量或大于零、有效数字不超过 15 位的价格，不含货币符号与千位分隔')
-                if code=='fulfillment_channel' and value in ('DEFAULT_AE','AMAZON_AE','DEFAULT_SA','AMAZON_SA') and not value.endswith('_'+marketplace):issue('error',row,sku,f['label'],'配送渠道所属地区与所选站点不一致')
+                if code=='fulfillment_channel' and value in ('DEFAULT_AE','AMAZON_AE','DEFAULT_SA','AMAZON_SA','DEFAULT_US','AMAZON_US') and not value.endswith('_'+marketplace):issue('error',row,sku,f['label'],'配送渠道所属地区与所选站点不一致')
                 if code=='currency' and value.upper()!=MARKET_CURRENCY[marketplace]:issue('error',row,sku,f['label'],'币种须与 '+marketplace+' 站点一致')
                 if code in ('item_name',) and len(value)>75:issue('warning',row,sku,f['label'],'标题超过 75 字符，请核对并精简；未自动删除产品事实')
                 if (code.startswith('bullet_point_') or code=='item_highlight') and len(value)>125:issue('warning',row,sku,f['label'],'卖点超过 125 字符，请核对并精简')

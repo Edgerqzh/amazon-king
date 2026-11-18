@@ -32,7 +32,7 @@ async function genRun(button,label,work){
 async function enterGeneratedTemplates(){
   const epoch=genEpoch;genControls();
   try{
-    const status=await request('/api/amazon/status');if(epoch!==genEpoch)return;
+    const status=await request('/api/amazon/status?store='+encodeURIComponent(currentStore));if(epoch!==genEpoch)return;
     genReady=!!status.configured;$('gen-connection').hidden=genReady;
     $('gen-connection-text').textContent=currentRole==='admin'?'先在设置中连接亚马逊，才能读取此卖家的商品类型规则。':'请联系管理员配置亚马逊连接，然后重新进入本页。';
     $('gen-connection-link').hidden=currentRole!=='admin';genControls();

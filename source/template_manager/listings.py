@@ -61,7 +61,7 @@ def explain_issue(issue):
 
 # --- status of existing SKUs (read-only) ------------------------------------
 def status(client, skus, marketplace):
-    market, seller = spapi.marketplace_id(marketplace), client.seller_id()
+    market, seller = spapi.marketplace_id(marketplace, getattr(client, 'region', None)), client.seller_id()
     rows = []
     for sku in clean_skus(skus, MAX_STATUS_SKUS):
         try:
@@ -251,7 +251,7 @@ class Definitions:
         return self.definition(client, product_type, marketplace)['schema']
 
     def search(self, client, marketplace, query, mode='keywords', search_locale='zh_CN'):
-        market = spapi.marketplace_id(marketplace)
+        market = spapi.marketplace_id(marketplace, getattr(client, 'region', None))
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200 or re.search(r'[\x00-\x1f]', query):
             raise ValueError('搜索文字须为 1–200 字，不含控制字符')
         if mode not in ('keywords', 'item_name') or search_locale not in ('zh_CN', 'en_US'):
@@ -280,7 +280,7 @@ class Definitions:
     def definition(self, client, product_type, marketplace, force=False, strict=False):
         if not isinstance(product_type, str) or not re.fullmatch(r'[A-Z0-9_]{1,80}', product_type):
             raise spapi.SpApiError('商品类型代码无效')
-        market, seller = spapi.marketplace_id(marketplace), client.seller_id()
+        market, seller = spapi.marketplace_id(marketplace, getattr(client, 'region', None)), client.seller_id()
         key = (seller, marketplace, product_type)
         with self.lock:
             hit = self.cache.get(key)
@@ -340,7 +340,7 @@ def precheck(client, definitions, rows, fields, marketplace, table_type, start=1
     """Ask Amazon to validate rows without saving them. Returns a processing-report shaped result."""
     if type(start) is not int or type(limit) is not int or start < 1 or not 1 <= limit <= MAX_PRECHECK_SKUS:
         raise ValueError('预检范围无效：一次最多 %d 个 SKU' % MAX_PRECHECK_SKUS)
-    market, seller = spapi.marketplace_id(marketplace), client.seller_id()
+    market, seller = spapi.marketplace_id(marketplace, getattr(client, 'region', None)), client.seller_id()
     chosen = rows[start - 1:start - 1 + limit]
     if not chosen:
         raise ValueError('所选范围内没有商品行，请调整起始序号')

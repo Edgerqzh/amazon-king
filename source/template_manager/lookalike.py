@@ -12,6 +12,9 @@ Nothing is submitted to Amazon. The photo is kept in memory for a short time onl
 AI output and catalog text are untrusted data, never instructions.
 """
 import base64
+import math
+from copy import deepcopy
+from datetime import datetime, timezone
 import re
 import secrets
 import threading
@@ -90,7 +93,7 @@ def _money(value):
     if not isinstance(value, dict):
         return None
     amount, currency = value.get('Amount'), value.get('CurrencyCode')
-    if type(amount) not in (int, float) or not isinstance(currency, str) or not re.fullmatch(r'[A-Z]{3}', currency):
+    if type(amount) not in (int, float) or not math.isfinite(amount) or amount < 0 or not isinstance(currency, str) or not re.fullmatch(r'[A-Z]{3}', currency):
         return None
     return {'amount': round(float(amount), 2), 'currency': currency}
 
@@ -160,6 +163,7 @@ class Service:
             while len(self.jobs) >= MAX_JOBS:
                 del self.jobs[next(iter(self.jobs))]
             self.jobs[token] = {'owner': owner, 'marketplace': market, 'mime': mime, 'image': data, 'brand': brand[:100],
+                                'description': description[:300], 'created_at': datetime.now(timezone.utc).isoformat(),
                                 'keywords': [], 'candidates': {}, 'store': None, 'expires': self.clock() + TOKEN_LIFE}
         return {'token': token, 'marketplace': market, 'description': description[:300], 'brand': brand[:100], 'keywords': words[:MAX_KEYWORDS]}
 
@@ -170,7 +174,7 @@ class Service:
         job = self._job(owner, body.get('token'))
         words = _keywords(body.get('keywords'))
         market = job['marketplace']
-        market_id = spapi.marketplace_id(market)
+        market_id = spapi.marketplace_id(market, getattr(client, 'region', None))
         found, errors = {}, []
         for word in words:
             position, page_token = 0, None
@@ -209,7 +213,7 @@ class Service:
                 if not page_token:
                     break
         with self.lock:
-            job.update(keywords=words, candidates=found, store=getattr(client, 'store_id', spapi.DEFAULT_STORE))
+            job.update(keywords=words, candidates=found, store=getattr(client, 'store_id', spapi.DEFAULT_STORE), queried_at=datetime.now(timezone.utc).isoformat())
         rows = sorted(found.values(), key=lambda r: (-len(r['found_by']), r['best_position'][0] if r['best_position'] else 999))
         for row in rows:
             self._evidence(job, row)
@@ -277,11 +281,41 @@ class Service:
                     row.update(verdict='', similarity=None, ai_reason='AI 没有给出有效结果，可重试')
         return {'items': rows}
 
+    def snapshot(self, user, entries, save_images=False):
+        owner = _user(user)
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
+            raise ValueError('每次保存 1–10 张图的结果')
+        if type(save_images) is not bool:
+            raise ValueError('保存原图需要明确勾选同意')
+        groups, seen = [], set()
+        with self.lock:
+            self._purge()
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get('token'), str) or entry['token'] in seen:
+                    raise ValueError('图片记录无效或重复')
+                seen.add(entry['token'])
+                job = self.jobs.get(entry['token'])
+                if job is None or job['owner'] != owner:
+                    raise ValueError('查找已过期或不属于当前成员，请重新查询后保存')
+                name = entry.get('name')
+                if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200 or any(ord(c) < 32 for c in name):
+                    raise ValueError('图片名称须为 1–200 个字符')
+                if not job['keywords']:
+                    raise ValueError('请先确认核心词并搜索，再保存结果')
+                group = {k: deepcopy(job[k]) for k in ('marketplace', 'description', 'brand', 'keywords', 'created_at', 'store')}
+                group.update(name=name.strip(), queried_at=job.get('queried_at', job['created_at']), items=deepcopy(list(job['candidates'].values())))
+                if save_images:
+                    group['original_image'] = {'mime': job['mime'], 'data': job['image']}
+                groups.append(group)
+        return groups
+
     # --- step 4 -------------------------------------------------------------
     def prices(self, user, client, stores, body):
         """Every seller's offer on each chosen ASIN, marking offers from the user's own stores."""
         owner = _user(user)
         job = self._job(owner, body.get('token'))
+        if job['store'] != getattr(client, 'store_id', spapi.DEFAULT_STORE):
+            raise ValueError('本次候选来自另一个店铺，请切回搜索时的店铺再查价格')
         asins = body.get('asins')
         if not isinstance(asins, list) or not 1 <= len(asins) <= PRICE_BATCH or len(set(asins)) != len(asins):
             raise ValueError('每次查 1–%d 个商品的价格' % PRICE_BATCH)
@@ -292,7 +326,7 @@ class Service:
                 raise ValueError('候选商品不存在，请重新搜索')
             rows.append(row)
         own = self._own_sellers(stores)
-        market_id = spapi.marketplace_id(job['marketplace'])
+        market_id = spapi.marketplace_id(job['marketplace'], getattr(client, 'region', None))
         for index, row in enumerate(rows):
             if index:
                 self.sleep(OFFERS_INTERVAL)
@@ -320,7 +354,8 @@ class Service:
             buy_box = next((_money(b.get('LandedPrice')) for b in summary.get('BuyBoxPrices') or [] if isinstance(b, dict)), None)
             count = summary.get('TotalOfferCount')
             row['offers'] = {'count': count if type(count) is int else len(offers), 'buy_box': buy_box, 'lowest': offers[0] if offers else None,
-                             'list': offers[:20], 'own_stores': sorted({o['own_store'] for o in offers if o['own_store']})}
+                             'list': offers[:20], 'own_stores': sorted({o['own_store'] for o in offers if o['own_store']}),
+                             'queried_at': datetime.now(timezone.utc).isoformat()}
         return {'items': rows}
 
     @staticmethod

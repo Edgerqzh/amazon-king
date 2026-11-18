@@ -25,7 +25,7 @@ from template_manager import ai
 from template_manager import roster
 from template_manager import batch
 from template_manager import processing
-from template_manager import spapi, listings, operations, vault, competitors, generated_templates, lookalike
+from template_manager import spapi, listings, operations, vault, competitors, generated_templates, lookalike, lookalike_history
 from template_manager.locks import LibraryLock
 
 WEB = Path(__file__).parent / 'web'
@@ -205,6 +205,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path.path == '/api/competitors':
                 self.send(self.server.competitors.list(user, parse_qs(path.query).get('marketplace', [''])[0]))
+                return
+            if path.path == '/api/lookalike/history':
+                self.send(self.server.lookalike_history.list(user))
+                return
+            if path.path in ('/api/lookalike/history/open', '/api/lookalike/history/export'):
+                query = parse_qs(path.query)
+                ident = query.get('id', [''])[0]
+                if path.path.endswith('/export'):
+                    data, filename, mime = self.server.lookalike_history.export(user, ident, query.get('format', ['csv'])[0])
+                    self.send(data, mime=mime, filename=filename)
+                else:
+                    self.send(self.server.lookalike_history.get(user, ident))
                 return
             if path.path in ('/api/competitors/batch', '/api/competitors/export'):
                 query = parse_qs(path.query)
@@ -429,6 +441,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send(service.compare(current_user, body))
                 elif action == 'prices':
                     self.send(service.prices(current_user, self.spapi_client(body.get('store')), self.server.spapi_stores, body))
+                elif action in ('history/save', 'history/delete'):
+                    self.send(getattr(self.server.lookalike_history, action.split('/')[1])(current_user, body))
                 else:
                     self.send({'error': '接口不存在'}, 404)
                 return
@@ -741,6 +755,7 @@ def create_server(data_dir, port=8765, host='127.0.0.1', allowed_hosts=None, sch
     server.ai_cache = ai.ResultCache()
     server.copy_cache = ai.ResultCache()
     server.lookalike = lookalike.Service(server.ai)
+    server.lookalike_history = lookalike_history.History(data_dir.parent / 'lookalike.sqlite3', server.lookalike)
     server.competitors = competitors.Service(data_dir.parent / 'competitors.sqlite3', ai_settings=server.ai)
     server.inventory_progress = InventoryProgress()
     server.allowed_hosts = set(allowed_hosts or [f'127.0.0.1:{server.server_port}', f'localhost:{server.server_port}'])

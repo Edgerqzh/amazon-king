@@ -2,7 +2,7 @@
 const COMP_CLASSES={pending:'待核对',direct:'直接竞品',same_type:'同类不同款',substitute:'替代方案',accessory:'配件耗材',same_brand:'同品牌家族',irrelevant:'无关'};
 const COMP_STATES={discovering:'正在查找类目',awaiting_category:'请选择一个类目',running:'正在采集榜单',completed:'采集完成',partial:'仅取得部分结果',blocked:'访问受限，已停止',cancelled:'已停止采集',interrupted:'上次任务已中断',failed:'未完成采集'};
 const COMP_ACTIVE=new Set(['discovering','awaiting_category','running']);
-let compBatch=null,compEpoch=0,compTimer=null,compBusy=false,compListSequence=0;
+let compBatch=null,compEpoch=0,compTimer=null,compBusy=false,compListSequence=0,compScoreStop=false;
 const compSelected=new Set();
 const compCanEdit=()=>currentRole!=='viewer';
 const compActive=()=>compBatch&&COMP_ACTIVE.has(compBatch.status);
@@ -15,6 +15,7 @@ function compOptions(select,all=false){
 compOptions($('comp-filter-class'),true);
 function compStopPoll(){clearTimeout(compTimer);compTimer=null;}
 function compClear(){
+  compScoreStop=true;
   ++compEpoch;++compListSequence;compStopPoll();compBusy=false;compBatch=null;compSelected.clear();
   $('comp-library').replaceChildren(new Option('请选择一个已保存批次',''));
   $('comp-list-note').textContent='';$('comp-state').hidden=true;
@@ -28,7 +29,7 @@ function compControls(){
   const edit=compCanEdit(),active=!!compActive(),off=compBusy||active;
   $('comp-editor').hidden=!edit;$('comp-viewer-note').hidden=edit;
   $('comp-market').disabled=off;
-  for(const id of ['comp-source','comp-keywords','comp-exclude','comp-target-title','comp-target-brand','comp-consent','comp-html','comp-import-url'])$(id).disabled=off;
+  for(const id of ['comp-source','comp-keywords','comp-exclude','comp-target-title','comp-target-brand','comp-include-search','comp-consent','comp-html','comp-import-url'])$(id).disabled=off;
   $('comp-start').disabled=!edit||off;$('comp-import').disabled=!edit||off;
   $('comp-open').disabled=compBusy||active||!$('comp-library').value;
   $('comp-library').disabled=compBusy||active;
@@ -37,6 +38,7 @@ function compControls(){
   $('comp-save').hidden=!edit;$('comp-save').disabled=off||!compSelected.size;
   $('comp-delete').hidden=!edit;$('comp-delete').disabled=off||!compBatch;
   $('comp-ai-box').hidden=!edit;$('comp-score').disabled=off||!compSelected.size||!$('comp-ai-consent').checked;
+  $('comp-score-all').disabled=!edit||off||!compBatch?.items?.some(i=>i.score==null)||!$('comp-ai-consent').checked;
   for(const button of document.querySelectorAll('#comp-rows button'))button.disabled=off;
   for(const input of document.querySelectorAll('#comp-rows select, #comp-rows textarea'))input.disabled=!edit||off;
   for(const kind of ['csv','xlsx','json'])$('comp-export-'+kind).disabled=compBusy||!compBatch;
@@ -44,13 +46,14 @@ function compControls(){
 function compFiltered(){
   const query=$('comp-search').value.trim().toLocaleLowerCase(),kind=$('comp-filter-class').value,hide=$('comp-filter-excluded').checked;
   const excludes=compBatch?.exclude_words||compWords('comp-exclude');
-  return (compBatch?.items||[]).filter(item=>{
+  const filtered=(compBatch?.items||[]).filter(item=>{
     const title=String(item.title||'').toLocaleLowerCase(),haystack=[title,...(item.observations||[]).map(o=>o.category||'')].join(' ').toLocaleLowerCase();
     return (!query||(item.asin+' '+title).toLocaleLowerCase().includes(query))&&(!kind||(item.classification||'pending')===kind)&&(!hide||!excludes.some(word=>haystack.includes(String(word).toLocaleLowerCase())));
   });
+  return $('comp-sort').value==='hits'?filtered.sort((a,b)=>(b.keyword_hit_count||0)-(a.keyword_hit_count||0)||(b.hits||0)-(a.hits||0)):filtered;
 }
 function compLink(item){
-  const a=el('a','comp-product-link',item.title||item.asin),host={AE:'www.amazon.ae',SA:'www.amazon.sa'}[compBatch?.marketplace];
+  const a=el('a','comp-product-link',item.title||item.asin),host={AE:'www.amazon.ae',SA:'www.amazon.sa',US:'www.amazon.com'}[compBatch?.marketplace];
   if(host&&/^[A-Z0-9]{10}$/.test(item.asin)){a.href='https://'+host+'/dp/'+item.asin;a.target='_blank';a.rel='noopener noreferrer';}
   return a;
 }
@@ -80,11 +83,13 @@ function compRender(){
     const product=cell(row,'');product.append(compLink(item),el('small','comp-asin',item.asin));
     const ranks=cell(row,'');
     for(const observation of item.observations||[]){
+      if(observation.source==='search'){ranks.append(el('p','comp-evidence',observation.keyword+' · 第 '+observation.page+' 页第 '+observation.position+' 位'+(observation.sponsored?' · 广告':'')));continue;}
       const line=el('div','comp-observation');line.append(el('b','',Number.isInteger(observation.rank)?'#'+observation.rank:'排名未识别'),el('span','',observation.category||'来源类目'),el('small','',localTime(observation.fetched_at)));
       if(observation.category_url)line.title=observation.category_url;
       ranks.append(line);
     }
     if(!ranks.childNodes.length)ranks.textContent='缺少榜单证据';
+    cell(row,(item.keyword_hit_count||0)+' 个核心词 · '+({bsr:'仅 BSR 榜',search:'仅搜索页',both:'BSR + 搜索页'}[item.source||'bsr']));
     const price=cell(row,item.price?[item.price,item.currency].filter(Boolean).join(' '):'未取得');
     if(item.raw_price)price.title='页面原文：'+item.raw_price;
     const evidence=cell(row,'');
@@ -163,7 +168,7 @@ $('comp-form').addEventListener('submit',event=>{
   event.preventDefault();
   if(compBatch&&!compBatch.saved&&compBatch.items?.length&&!confirm('当前候选还未入库。确定开始新的采集吗？'))return;
   compRun($('comp-start'),'正在启动…',async epoch=>{
-    const result=await postJSON('/api/competitors/start',{...compInput(),source:$('comp-source').value.trim(),consent:$('comp-consent').checked});
+    const result=await postJSON('/api/competitors/start',{...compInput(),source:$('comp-source').value.trim(),consent:$('comp-consent').checked,include_search:$('comp-include-search').checked});
     if(epoch===compEpoch){compSelected.clear();compApply(result);}
   });
 });
@@ -191,7 +196,7 @@ $('comp-list-refresh').addEventListener('click',()=>compLoadList().catch(e=>noti
 $('comp-open').addEventListener('click',()=>compRun($('comp-open'),'正在读取…',async epoch=>{
   const result=await request(compQuery('batch',$('comp-library').value));if(epoch===compEpoch)compApply(result);
 }));
-for(const id of ['comp-search','comp-filter-class','comp-filter-excluded'])$(id).addEventListener(id==='comp-search'?'input':'change',compRender);
+for(const id of ['comp-search','comp-filter-class','comp-filter-excluded','comp-sort'])$(id).addEventListener(id==='comp-search'?'input':'change',compRender);
 $('comp-select-all').addEventListener('change',()=>{for(const item of compFiltered())if($('comp-select-all').checked)compSelected.add(item.asin);else compSelected.delete(item.asin);compRender();});
 $('comp-save').addEventListener('click',()=>compRun($('comp-save'),'正在保存…',async epoch=>{
   if(compBatch.saved&&compSelected.size<compBatch.items.length&&!confirm('这会将已保存批次替换为所选候选，未选中的商品及其复核记录将被移出这个批次。确定继续？'))return;
@@ -211,6 +216,34 @@ $('comp-score').addEventListener('click',()=>compRun($('comp-score'),'AI 正在�
   const result=await postJSON('/api/competitors/score',{id:compBatch.id,asins,ai_consent:$('comp-ai-consent').checked});
   if(epoch===compEpoch){compApply(result,false);const summary=result.ai_summary;notify(summary?'AI 已完成 '+summary.completed+' / '+summary.requested+' 个；请核对建议和未完成项。':'未取得有效 AI 分析结果',!summary||summary.failed>0);}
 }));
+async function compScoreBatches(asins,send,progress,stopped){
+  let completed=0;
+  for(let offset=0;offset<asins.length;offset+=20){
+    if(stopped())break;
+    const batch=asins.slice(offset,offset+20);
+    progress(completed,asins.length,batch.length);
+    const result=await send(batch);
+    const summary=result.ai_summary;
+    completed+=summary?.completed||0;
+    progress(completed,asins.length,0);
+    if(!summary||summary.failed>0||summary.completed!==batch.length)throw new Error('当前批次未全部取得有效建议，已停止后续批次。已成功的分数保留，可再次点击继续未打分项。');
+  }
+  return completed;
+}
+$('comp-score-stop').addEventListener('click',()=>{compScoreStop=true;$('comp-score-progress').textContent+=' · 当前批次返回后停止';$('comp-score-stop').disabled=true;});
+$('comp-score-all').addEventListener('click',()=>compRun($('comp-score-all'),'正在分批打分…',async epoch=>{
+  const id=compBatch.id,asins=compBatch.items.filter(i=>i.score==null).map(i=>i.asin);
+  compScoreStop=false;$('comp-score-stop').hidden=false;$('comp-score-stop').disabled=false;
+  try{
+    const completed=await compScoreBatches(asins,async batch=>{
+      const result=await postJSON('/api/competitors/score',{id,asins:batch,ai_consent:$('comp-ai-consent').checked});
+      if(epoch===compEpoch)compApply(result,false);
+      return result;
+    },(done,total,current)=>{if(epoch===compEpoch)$('comp-score-progress').textContent='已打分 '+done+' / '+total+' 个'+(current?' · 当前批次 '+current+' 个':'');},()=>compScoreStop||epoch!==compEpoch);
+    if(epoch===compEpoch)$('comp-score-progress').textContent=(compScoreStop?'已停止，':'已完成，')+'本轮取得 '+completed+' / '+asins.length+' 个有效建议。';
+  }catch(error){if(epoch===compEpoch)$('comp-score-progress').textContent+=' · '+error.message;throw error;}
+  finally{if(epoch===compEpoch)$('comp-score-stop').hidden=true;}
+}));
 for(const kind of ['csv','xlsx','json'])$('comp-export-'+kind).addEventListener('click',()=>compRun($('comp-export-'+kind),'正在导出…',async epoch=>{
   const response=await fetch(compQuery('export',compBatch.id)+'&format='+kind);
   if(response.status===401){$('workspace').hidden=true;$('login-screen').hidden=false;throw new Error('请先登录');}
@@ -222,3 +255,12 @@ new MutationObserver(()=>{if($('workspace').hidden)compClear();}).observe($('wor
 window.addEventListener('hashchange',()=>{if($('competitors-panel').hidden)compStopPoll();});
 $('backup-panel').append(el('p','hint','模板备份不包含竞品库。请在“竞品库”页面另行导出完整 JSON，或停服后备份 competitors.sqlite3。'));
 if(!$('workspace').hidden&&$('workspace').dataset.page==='competitors')enterCompetitors();
+
+function compEstimate(){
+  const n=Math.min(5,compWords('comp-keywords').length),search=$('comp-include-search').checked&&n>0;
+  const pages=2+(search?n*5:0),minimum=(pages+2)*5;
+  $('comp-time-estimate').textContent='最多 '+pages+' 页；最低等待约 '+Math.ceil(minimum/60)+' 分钟，含网络响应通常约 '+Math.ceil((minimum+pages*12)/60)+' 分钟。'+(!n?'填写核心词后可同时采集搜索页。':'')+' 遇访问限制立即停止，已取得结果保留。';
+}
+$('comp-keywords').addEventListener('input',compEstimate);
+$('comp-include-search').addEventListener('change',compEstimate);
+compEstimate();

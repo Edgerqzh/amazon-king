@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 import uuid
+import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -47,7 +48,7 @@ def _words(value, cap=5):
     result = []
     for word in value:
         word = _text(word, 100, '关键词', empty=False)
-        if word not in result:
+        if word.casefold() not in {w.casefold() for w in result}:
             result.append(word)
     return result
 
@@ -69,7 +70,7 @@ def _id(value):
     return value
 
 
-def _selected(body, snapshot, limit=100):
+def _selected(body, snapshot, limit=300):
     if 'asins' not in body:
         values = [i['asin'] for i in snapshot['items']]
     else:
@@ -183,7 +184,9 @@ class Service:
 
     def start(self, user, body):
         _identity(user, True)
-        _body(body, {'marketplace', 'source', 'keywords', 'exclude_words', 'consent', 'target_title', 'target_brand'})
+        _body(body, {'marketplace', 'source', 'keywords', 'exclude_words', 'consent', 'target_title', 'target_brand', 'include_search'})
+        if type(body.get('include_search', True)) is not bool:
+            raise ValueError('关键词搜索页开关无效')
         if body.get('consent') is not True:
             raise ValueError('公开网络采集需要明确同意')
         market = bsr.marketplace(body.get('marketplace'))
@@ -194,6 +197,7 @@ class Service:
         exclude = _words(body.get('exclude_words', []), 20)
         title, brand = _text(body.get('target_title', ''), 1000), _text(body.get('target_brand', ''), 200)
         data = self._new(user, market, target, title, brand, keywords, exclude, url, 'discovering' if target else 'running')
+        data['include_search'] = body.get('include_search', True)
         if not target:
             data['selected_category'] = bsr.category_url(url, market)
             data['categories'] = [{'url': data['selected_category'], 'label': '所选 BSR 类目'}]
@@ -260,6 +264,8 @@ class Service:
             if not data['target_asin']:
                 collect_url = data['source_url']
             self.collector.collect(data['marketplace'], collect_url, cancel=cancel, checkpoint=checkpoint)
+            if data.get('include_search') and data['keywords']:
+                self.collector.search(data['marketplace'], data['keywords'], cancel=cancel, checkpoint=checkpoint)
             def finish(c):
                 current = read(c)
                 if cancel.is_set():
@@ -267,7 +273,9 @@ class Service:
                 elif not current['items']:
                     current.update(status='failed', message='采集未取得可核对的商品；未标记为成功。')
                 else:
-                    current.update(status='completed', message='公开榜单读取完成；候选及 AI 建议仍需人工核对。')
+                    current.update(status='completed', message='公开页面读取完成；候选及 AI 建议仍需人工核对。')
+                    if current.get('candidate_limit_reached'):
+                        current['message'] += ' 已达到 300 个候选上限，超出部分未收入。'
                 self._write(c, current)
             self._transaction(finish)
         except Exception as error:
@@ -326,6 +334,8 @@ class Service:
             return self._transaction(update)
 
     def _merge_page(self, data, page):
+        if isinstance(page, dict) and page.get('source') == 'search':
+            return self._merge_search(data, page)
         if not isinstance(page, dict) or type(page.get('page')) is not int or page['page'] not in (1, 2):
             raise bsr.BsrError('采集页码格式无效')
         market = data['marketplace']
@@ -351,14 +361,14 @@ class Service:
             if price and not re.fullmatch(r'\d{1,12}(?:\.\d{1,2})?', price):
                 raise bsr.BsrError('榜单价格格式无效')
             currency = raw.get('currency', '')
-            if currency not in ('', 'AED', 'SAR'):
+            if currency not in ('', 'AED', 'SAR', 'USD'):
                 raise bsr.BsrError('榜单币种格式无效')
             cleaned.append({'asin': value, 'title': title, 'url': bsr.product_url(market, value), 'price': price, 'currency': currency, 'raw_price': _text(raw.get('raw_price', ''), 200), 'rank': rank})
         index = {i['asin']: i for i in data['items']}
         for raw in cleaned:
             item = index.get(raw['asin'])
             if item is None:
-                if len(index) >= 100:
+                if len(index) >= 300:
                     continue
                 item = {k: raw[k] for k in ('asin', 'title', 'url', 'price', 'currency', 'raw_price')}
                 item.update(observations=[], hits=0, keyword_hits=[], evidence=[], classification='pending', note='', score=None, ai_classification='')
@@ -368,9 +378,9 @@ class Service:
             if not any((o['category_url'], o['page']) == key for o in item['observations']):
                 item['observations'].append({'category_url': category, 'category': label, 'rank': raw['rank'], 'page': page['page'], 'fetched_at': stamp})
             item['hits'] = len(item['observations'])
-            categories = {o['category_url'] for o in item['observations']}
+            categories = {o['category_url'] for o in item['observations'] if o.get('source', 'bsr') == 'bsr'}
             if len(categories) == 1:
-                item['best_rank'] = min(o['rank'] for o in item['observations'])
+                item['best_rank'] = min(o['rank'] for o in item['observations'] if 'rank' in o)
             else:
                 item.pop('best_rank', None)
             haystack = (item['title'] + ' ' + ' '.join(o['category'] for o in item['observations'])).casefold()
@@ -384,10 +394,86 @@ class Service:
             if brand and brand.casefold() in item['title'].casefold():
                 item['evidence'].append('标题包含目标品牌文字：' + brand + '（非品牌归属确认）')
             item['evidence'] = list(dict.fromkeys(item['evidence']))
+            self._search_evidence(data, item)
         page_key = {'category_url': category, 'page': page['page']}
         if page_key not in data['pages']:
-            if len(data['pages']) >= 2:
+            if sum(p.get('source', 'bsr') == 'bsr' for p in data['pages']) >= 2:
                 raise bsr.BsrError('达到两页采集上限', 'partial')
+            data['pages'].append(page_key)
+        data['pages_done'] = len(data['pages'])
+
+    def _search_evidence(self, data, item):
+        observations = item['observations']
+        search = [o for o in observations if o.get('source') == 'search']
+        has_bsr = any(o.get('source', 'bsr') == 'bsr' for o in observations)
+        item['search_keywords'] = [w for w in data['keywords'] if any(o['keyword'] == w for o in search)]
+        item['keyword_hit_count'] = len(item['search_keywords'])
+        item['source'] = 'both' if search and has_bsr else 'search' if search else 'bsr'
+        best = min(search, key=lambda o: (o['page'], o['position'])) if search else None
+        item['best_position'] = {k: best[k] for k in ('keyword', 'page', 'position', 'sponsored')} if best else None
+        item['hits'] = len(observations)
+        if search:
+            item['evidence'].append('被 %d 个核心词搜到：%s' % (len(item['search_keywords']), '、'.join(item['search_keywords'])))
+            item['evidence'].append('最好搜索位置：%s，第 %d 页第 %d 位%s' % (best['keyword'], best['page'], best['position'], '（广告）' if best['sponsored'] else ''))
+        item['evidence'].append('来源：' + {'both': 'BSR 榜和搜索页', 'search': '仅搜索页', 'bsr': '仅 BSR 榜'}[item['source']])
+        item['evidence'] = list(dict.fromkeys(item['evidence']))
+
+    def _merge_search(self, data, page):
+        market = data['marketplace']
+        url = bsr.validate_search_url(page.get('source_url'), market)
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+        word, number = query['k'], int(query['page'])
+        if word not in data['keywords'] or page.get('keyword') != word or type(page.get('page')) is not int or page['page'] != number:
+            raise bsr.BsrError('搜索来源与本批核心词或页码不一致')
+        stamp = _text(page.get('fetched_at'), 100, empty=False)
+        incoming = page.get('items')
+        if not isinstance(incoming, list) or len(incoming) > 100:
+            raise bsr.BsrError('搜索结果格式无效')
+        cleaned = []
+        for raw in incoming:
+            if not isinstance(raw, dict):
+                raise bsr.BsrError('搜索商品格式无效')
+            value = bsr.asin(raw.get('asin'))
+            position = raw.get('position')
+            if type(position) is not int or not 1 <= position <= 100 or type(raw.get('sponsored')) is not bool:
+                raise bsr.BsrError('搜索位置或广告标记无效')
+            price = _text(raw.get('price', ''), 40)
+            if price and not re.fullmatch(r'\d{1,12}(?:\.\d{1,2})?', price):
+                raise bsr.BsrError('搜索价格格式无效')
+            if raw.get('currency', '') not in ('', 'AED', 'SAR', 'USD'):
+                raise bsr.BsrError('搜索币种格式无效')
+            cleaned.append({**raw, 'asin': value, 'title': _text(raw.get('title', ''), 1000), 'price': price,
+                            'raw_price': _text(raw.get('raw_price', ''), 200), 'currency': raw.get('currency', '')})
+        index = {i['asin']: i for i in data['items']}
+        for raw in cleaned:
+            item = index.get(raw['asin'])
+            if item is None:
+                if len(index) >= 300:
+                    data['candidate_limit_reached'] = True
+                    continue
+                item = {k: raw[k] for k in ('asin', 'title', 'price', 'currency', 'raw_price')}
+                item.update(url=bsr.product_url(market, raw['asin']), observations=[], hits=0, keyword_hits=[], evidence=[],
+                            classification='pending', note='', score=None, ai_classification='')
+                index[item['asin']] = item
+                data['items'].append(item)
+            key = (word, number, raw['position'])
+            if not any((o.get('keyword'), o['page'], o.get('position')) == key for o in item['observations']):
+                item['observations'].append({'source': 'search', 'category': '', 'category_url': '', 'source_url': url,
+                                             'keyword': word, 'page': number, 'position': raw['position'],
+                                             'sponsored': raw['sponsored'], 'fetched_at': stamp})
+            # Rebuild from observations so re-imports never accumulate stale notes.
+            item['evidence'] = ['标题：' + item['title']] if item['title'] else []
+            item['evidence'].extend('来源类目：' + o['category'] for o in item['observations'] if o.get('category'))
+            haystack = (item['title'] + ' ' + ' '.join(o.get('category', '') for o in item['observations'])).casefold()
+            item['keyword_hits'] = [w for w in data['keywords'] if w.casefold() in haystack]
+            item['evidence'].extend('本地关键词匹配：' + w for w in item['keyword_hits'])
+            item['evidence'].extend('本地排除词匹配：' + w for w in data['exclude_words'] if w.casefold() in haystack)
+            brand = data.get('target_brand', '')
+            if brand and brand.casefold() in item['title'].casefold():
+                item['evidence'].append('标题包含目标品牌文字：' + brand + '（非品牌归属确认）')
+            self._search_evidence(data, item)
+        page_key = {'source': 'search', 'keyword': word, 'page': number}
+        if page_key not in data['pages']:
             data['pages'].append(page_key)
         data['pages_done'] = len(data['pages'])
 
@@ -563,6 +649,12 @@ def _export_rows(data):
     rows = [['站点', 'ASIN', '标题', '商品链接', '价格', '币种', '原始价格', '来源观察记录（不同类目排名不可比较）', '来源命中数', '关键词匹配', '本地证据', '人工分类', '人工备注', 'AI相关度建议1–10', 'AI分类建议', 'AI依据建议', 'AI服务商', 'AI模型']]
     for item in data['items']:
         rows.append([data['marketplace'], item['asin'], item['title'], item['url'], item['price'], item['currency'], item['raw_price'], json.dumps(item['observations'], ensure_ascii=False), str(item['hits']), '；'.join(item['keyword_hits']), '；'.join(item['evidence']), CLASSES[item['classification']], item['note'], '' if item['score'] is None else str(item['score']), CLASSES.get(item['ai_classification'], ''), item.get('ai_note', ''), item.get('ai_provider', ''), item.get('ai_model', '')])
+    rows[0].extend(['命中次数（核心词数）', '命中的词', '最好搜索位置（页/位/广告）', '来源'])
+    for row, item in zip(rows[1:], data['items']):
+        best = item.get('best_position')
+        row.extend([str(item.get('keyword_hit_count', 0)), '；'.join(item.get('search_keywords', [])),
+                    ('%s / %s / %s / %s' % (best['keyword'], best['page'], best['position'], '广告' if best['sponsored'] else '自然')) if best else '',
+                    {'both': 'BSR 榜和搜索页', 'search': '仅搜索页', 'bsr': '仅 BSR 榜'}.get(item.get('source', 'bsr'), '')])
     return rows
 
 

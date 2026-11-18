@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const UI_REVISION='规则生成与 API 上架版 1115';
+const UI_REVISION='竞品库与多图历史版 1117';
 const TABLE_TYPES={upload:'上传表格',price_update:'改价表格'};
 ensureInventoryShopPicker();
 let templates = [];
@@ -39,7 +39,7 @@ PAGES.generate={id:'generated-panel',title:'模板库',description:'按亚马逊
 const GROUPS={templates:['library','generate','import','batch','aliases','check'],settings:['connection','shops','ai','members','backup']};
 const SUB_LABELS={library:'全部模板',generate:'从规则生成',import:'上传模板',batch:'批量生成',aliases:'叫法归类',check:'与亚马逊对照',connection:'亚马逊连接',shops:'店铺',ai:'AI',members:'成员',backup:'备份'};
 PAGES.lookalike={id:'lookalike-panel',title:'以图找同款',description:'上传商品图，找出亚马逊上的同款商品和各卖家的价格。',roles:['admin','editor','viewer']};
-PAGES.competitors={id:'competitors-panel',title:'竞品库',description:'从公开 BSR 榜单收集候选，核对后保存。无需连接店铺。',roles:['admin','editor','viewer']};
+PAGES.competitors={id:'competitors-panel',title:'竞品库',description:'从公开 BSR 榜单和核心词搜索页收集候选，核对后保存。无需连接店铺。',roles:['admin','editor','viewer']};
 const STORE_PAGES=['home','amazon','ops','orders','sales'];
 const STORE_SELECT_PAGES=[...STORE_PAGES,'fill','generate','check','connection','lookalike'];
 function renderSubnav(key){
@@ -230,7 +230,7 @@ async function load() {
   const [stored,registeredShops]=await Promise.all([request('/api/templates'),request('/api/shops')]);templates=stored;
   countTo($('total'),templates.length);countTo($('markets'),new Set(templates.map(t=>t.marketplace)).size);countTo($('categories'),new Set(templates.map(t=>t.category)).size);replayRows();
   const selected=$('filter-market').value;$('filter-market').replaceChildren(new Option('全部站点',''));
-  [...new Set(['AE','SA',...templates.map(t=>t.marketplace)])].sort().forEach(m=>$('filter-market').add(new Option(m,m)));
+  [...new Set(['AE','SA','US',...templates.map(t=>t.marketplace)])].sort().forEach(m=>$('filter-market').add(new Option(m,m)));
   $('filter-market').value=selected;const selectedShop=$('filter-shop').value;const shops=[...new Set(['通用模板',...registeredShops,...templates.map(t=>t.shop||'通用模板')])].sort();$('filter-shop').replaceChildren(new Option('全部店铺',''),...shops.map(shop=>new Option(shop,shop)));$('filter-shop').value=selectedShop;$('shop-options').replaceChildren(...shops.map(shop=>new Option(shop,shop)));inventoryShopNames=shops;updateInventoryShopOptions();for(const [id,field,label] of [['filter-category','category','全部类别'],['filter-version','version','全部版本']]){const value=$(id).value;$(id).replaceChildren(new Option(label,''),...[...new Set(field==='category'?templates.flatMap(templateCategories):templates.map(t=>t[field]))].sort().map(item=>new Option(item,item)));$(id).value=value;}render();updateBatchVersion();updateFillOptions();updateReportTemplates();
 }
 // Raw binary upload: JSON metadata followed by the file itself; the browser streams the file without base64.
@@ -1038,7 +1038,7 @@ function updateFillOptions(){
   $('fill-mode-note').textContent=kind==='price_update'?'改价／库存模式：按 SKU 填写明确提供的售价、库存和对应报价字段，使用部分更新操作。标题、品牌、描述等字段不参与填写。':'新商品模式：可匹配 SKU、商品类型、标题、品牌、描述、价格、库存、颜色、尺码、图片链接和原模板其他明确字段。缺少资料会列入待核对清单。';updateFillActions();
 }
 function openFillTemplate(template){
-  if(!['AE','SA'].includes(template.marketplace)){notify('当前填写支持 AE 和 SA 模板',true);return;}
+  if(!['AE','SA','US'].includes(template.marketplace)){notify('当前填写支持 AE、SA 和 US 模板',true);return;}
   $('fill-type').value=template.table_type||'upload';$('fill-market').value=template.marketplace;updateFillOptions();$('fill-shop').value=template.shop||'通用模板';updateFillOptions();$('fill-template').value=template.id;resetFill();updateGeneratedFillNote();updateFillActions();location.hash='fill';showPage('fill');window.scrollTo({top:0,behavior:'instant'});
 }
 for(const id of ['fill-type','fill-market','fill-shop'])$(id).addEventListener('change',()=>{resetFill();updateFillOptions();});
@@ -1320,7 +1320,7 @@ for(const button of document.querySelectorAll('#report-levels [data-level]'))but
 $('report-search').addEventListener('input',()=>{if(reportData)renderReportRows();});
 $('report-open-fill').addEventListener('click',()=>{
   const id=reportData?.template?.id||$('report-template').value,template=templates.find(t=>t.id===id);
-  if(template&&!reportDraft()&&$('fill-template').value!==id&&['AE','SA'].includes(template.marketplace)){openFillTemplate(template);return;}
+  if(template&&!reportDraft()&&$('fill-template').value!==id&&['AE','SA','US'].includes(template.marketplace)){openFillTemplate(template);return;}
   location.hash='fill';
 });
 $('report-export').addEventListener('click',()=>{
@@ -1345,6 +1345,7 @@ async function loadAmazonStatus(){
   }
   if(amazonStatus&&amazonStatus.store!==currentStore&&!(currentStore===''&&amazonStatus.store==='default'))currentStore=amazonStatus.store;
   renderAmazonStatus();updatePrecheckActions();renderStoreSelect();
+  if(amazonStatus)setGlobalMarket(globalMarket,false);
 }
 function storeList(){return amazonStatus?.stores||[];}
 function storeName(){return amazonStatus?.name||'主店铺';}
@@ -1376,12 +1377,13 @@ function renderAmazonStatus(){
     ...(admin0&&s?.vault&&storeList().length<(s.limit||10)?[(()=>{const add=el('button','store-chip store-add','+ 添加店铺');add.type='button';add.addEventListener('click',()=>{credAdding=true;clearCredentialFields();renderAmazonStatus();$('cred-name').focus();});return add;})()]:[]));
   $('amazon-stores').hidden=!s;
   $('amazon-connection').classList.toggle('ready',ready&&!credAdding);$('amazon-connection-icon').replaceChildren(svgIcon(ready&&!credAdding?'check':'plug'));
-  $('amazon-connection-text').textContent=!s?'暂时无法读取接口配置状态，请稍后点“重新读取配置”。':credAdding?'添加一个你自己的店铺：先在那个店铺的卖家后台授权应用，拿到它的 Refresh Token，再填到下面。':ready?(storeList().length>1?'店铺“'+s.name+'”的':'')+'接口凭证已配置'+(s.seller_hint?'，卖家编号 '+s.seller_hint:'')+'。支持站点：AE、SA。':'接口凭证尚未配置完整，缺少：'+s.missing.join('、')+'。'+(currentRole==='admin'?'请按下方说明在服务器本机配置。':'请联系管理员在服务器本机配置。');
-  $('amazon-connection-detail').textContent=s&&!credAdding?[s.problem,ready?'凭证保存在：'+s.source:'',ready?'接口地区：欧洲区（含阿联酋、沙特）':'',s.plain_file&&s.in_vault?'凭证文件里还留着明文，确认连接正常后可以删掉那个文件':''].filter(Boolean).join(' · '):'';
+  $('amazon-connection-text').textContent=!s?'暂时无法读取接口配置状态，请稍后点“重新读取配置”。':credAdding?'添加一个你自己的店铺：先在那个店铺的卖家后台授权应用，拿到它的 Refresh Token，再填到下面。':ready?(storeList().length>1?'店铺“'+s.name+'”的':'')+'接口凭证已配置'+(s.seller_hint?'，卖家编号 '+s.seller_hint:'')+'。支持站点：'+Object.keys(s.marketplace_ids||{}).join('、')+'。':'接口凭证尚未配置完整，缺少：'+s.missing.join('、')+'。'+(currentRole==='admin'?'请按下方说明在服务器本机配置。':'请联系管理员在服务器本机配置。');
+  $('amazon-connection-detail').textContent=s&&!credAdding?[s.problem,ready?'凭证保存在：'+s.source:'',ready?'接口地区：'+(s.region==='NA'?'北美区（US）':'欧洲区（AE、SA）'):'',s.plain_file&&s.in_vault?'凭证文件里还留着明文，确认连接正常后可以删掉那个文件':''].filter(Boolean).join(' · '):'';
   const admin=currentRole==='admin',extra=credAdding||(s&&s.store!=='default');
   $('amazon-credentials').hidden=!admin||!s?.vault;
   $('cred-forget').hidden=credAdding||!(s?.store!=='default'||s?.in_vault);$('cred-forget').textContent=s?.store&&s.store!=='default'?'移除这个店铺':'清除已保存的凭证';
   $('cred-cancel').hidden=!credAdding;$('cred-name').required=credAdding;$('cred-name').placeholder=credAdding?'例如：阿联酋二店':(s?.name||'');
+  $('cred-region').value=credAdding?'EU':(s?.region||'EU');
   $('cred-save').textContent=credAdding?'添加店铺':'保存到这台电脑';
   $('amazon-credentials-title').textContent=credAdding?'添加店铺':s?.in_vault?'更换“'+s.name+'”的凭证或名称':'填写“'+(s?.name||'主店铺')+'”的亚马逊凭证';
   $('amazon-credentials-note').textContent=s?.vault?'保存后由 '+s.vault_name+' 加密保管，只有这台电脑上当前的 Windows 账户能读取；这里不会显示已保存的内容。'+(s.in_vault&&!credAdding?'只更换其中一项时，其余留空即可。':'')+(extra?'如果这个店铺授权的是主店铺那个应用，Client ID 和 Client Secret 留空即可，自动沿用主店铺的。每个店铺的 Refresh Token 和卖家编号都不同，必须填这个店铺自己的。':'')+'填写前请先停止屏幕共享。':'';
@@ -1394,7 +1396,7 @@ window.amazonStatusForOAuth=()=>amazonStatus;window.currentRoleForOAuth=()=>curr
 function showAmazon(){
   if(!amazonStatus)loadAmazonStatus();else renderAmazonStatus();
   $('amazon-from-draft').hidden=!(fillReport?.row_sources?.length);
-  const pick=$('check-template'),chosen=pick.value;pick.replaceChildren(...templates.filter(t=>['AE','SA'].includes(t.marketplace)).map(t=>new Option([t.shop||'通用模板',t.marketplace,TABLE_TYPES[t.table_type||'upload'],t.category,t.version].join(' · '),t.id)));if(chosen)pick.value=chosen;$('check-run').disabled=!pick.options.length||currentRole==='viewer';$('check-run').hidden=currentRole==='viewer';pick.hidden=currentRole==='viewer';if(currentRole==='viewer')$('check-status').textContent='模板对照由管理员或编辑者操作。';
+  const pick=$('check-template'),chosen=pick.value;pick.replaceChildren(...templates.filter(t=>['AE','SA','US'].includes(t.marketplace)).map(t=>new Option([t.shop||'通用模板',t.marketplace,TABLE_TYPES[t.table_type||'upload'],t.category,t.version].join(' · '),t.id)));if(chosen)pick.value=chosen;$('check-run').disabled=!pick.options.length||currentRole==='viewer';$('check-run').hidden=currentRole==='viewer';pick.hidden=currentRole==='viewer';if(currentRole==='viewer')$('check-status').textContent='模板对照由管理员或编辑者操作。';
 }
 $('amazon-refresh').addEventListener('click',async()=>{await loadAmazonStatus();notify(amazonStatus?.configured?'已读取到完整的接口凭证':'接口凭证仍未配置完整',!amazonStatus?.configured);});
 $('amazon-test').addEventListener('click',async()=>{
@@ -1755,9 +1757,13 @@ for(const panel of document.querySelectorAll('.panel')){
 
 const MARKET_SELECTS=['amazon-market','ops-market','fba-market','orders-market','sales-market','export-market'];
 let globalMarket='AE';
-try{if(localStorage.getItem('market')==='SA')globalMarket='SA';}catch(e){/* storage may be unavailable */}
+try{if(['AE','SA','US'].includes(localStorage.getItem('market')))globalMarket=localStorage.getItem('market');}catch(e){/* storage may be unavailable */}
 for(const id of MARKET_SELECTS){const select=$(id);(select.parentElement.tagName==='LABEL'?select.parentElement:select).classList.add('market-synced');}
 function setGlobalMarket(market,reload){
+  const supported=Object.keys(amazonStatus?.marketplace_ids||{AE:1,SA:1,US:1});
+  if(!supported.includes(market))market=supported[0]||'AE';
+  for(const button of document.querySelectorAll('#global-market [data-market]'))button.hidden=!supported.includes(button.dataset.market);
+  for(const id of ['gen-market','look-market']){for(const option of $(id).options)option.disabled=!supported.includes(option.value);if(!supported.includes($(id).value))$(id).value=market;}
   globalMarket=market;try{localStorage.setItem('market',market);}catch(e){/* ignore */}
   for(const id of MARKET_SELECTS)$(id).value=market;
   for(const button of document.querySelectorAll('#global-market [data-market]'))button.setAttribute('aria-pressed',String(button.dataset.market===market));
@@ -1855,11 +1861,11 @@ function clearCredentialFields(){for(const id of Object.values(CRED_FIELDS))$(id
 $('amazon-credentials').addEventListener('submit',event=>{event.preventDefault();withButton($('cred-save'),'正在保存…',async()=>{
   const body=Object.fromEntries(Object.entries(CRED_FIELDS).map(([key,id])=>[key,$(id).value.trim()]));
   const name=$('cred-name').value.trim();
-  if(!name&&!Object.values(body).some(Boolean))throw new Error('请先填写要保存的内容');
+  if(!name&&!Object.values(body).some(Boolean)&&$('cred-region').value===(amazonStatus?.region||'EU'))throw new Error('请先填写要保存的内容');
   if(credAdding&&!name)throw new Error('请给这个店铺起个名字');
-  const adding=credAdding,saved=await postJSON('/api/amazon/credentials',{...body,name,store:adding?'new':currentStore});
+  const adding=credAdding,saved=await postJSON('/api/amazon/credentials',{...body,name,region:$('cred-region').value,store:adding?'new':currentStore});
   clearCredentialFields();credAdding=false;
-  if(adding){await setStore(saved.store);}else{amazonStatus=saved;renderAmazonStatus();renderStoreSelect();updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];}
+  if(adding){await setStore(saved.store);}else{amazonStatus=saved;renderAmazonStatus();renderStoreSelect();setGlobalMarket(globalMarket,false);updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];}
   notify(saved.configured?(adding?'店铺已添加':'已保存')+'，点“测试连接”确认能连上':'已保存，但还不完整');
 });});
 $('cred-forget').addEventListener('click',()=>{

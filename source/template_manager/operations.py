@@ -13,16 +13,18 @@ import decimal
 import gzip
 import io
 import json
+from pathlib import Path
 import re
 import secrets
 import threading
 import time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import listings, processing, spapi
 
-CURRENCY = {'AE': 'AED', 'SA': 'SAR'}
+CURRENCY = {'AE': 'AED', 'SA': 'SAR', 'US': 'USD'}
 UTC_OFFSET = {'AE': 4, 'SA': 3}
-ZONE = {'AE': 'Asia/Dubai', 'SA': 'Asia/Riyadh'}
+ZONE = {'AE': 'Asia/Dubai', 'SA': 'Asia/Riyadh', 'US': 'America/Los_Angeles'}
 ORDER_FILTERS = {'': '', 'open': 'Unshipped,PartiallyShipped', 'pending': 'Pending', 'shipped': 'Shipped', 'canceled': 'Canceled'}
 REPORTS = {
     'listings': ('GET_MERCHANT_LISTINGS_ALL_DATA', '全部商品清单', False),
@@ -53,7 +55,7 @@ def money(value):
 
 # --- orders (read-only, no buyer details) ---------------------------------------
 def orders(client, marketplace, days=7, status='', now=None):
-    market = spapi.marketplace_id(marketplace)
+    market = spapi.marketplace_id(marketplace, getattr(client, 'region', None))
     whole(days, 1, 30, '天数')
     if status not in ORDER_FILTERS:
         raise ValueError('订单状态筛选无效')
@@ -93,9 +95,16 @@ def order_items(client, order_id):
 
 # --- sales per day (read-only) --------------------------------------------------
 def sales(client, marketplace, days=14, now=None):
-    market = spapi.marketplace_id(marketplace)
+    market = spapi.marketplace_id(marketplace, getattr(client, 'region', None))
     whole(days, 1, 90, '天数')
-    zone = datetime.timezone(datetime.timedelta(hours=UTC_OFFSET[marketplace]))
+    if marketplace == 'US':
+        try:
+            zone = ZoneInfo(ZONE[marketplace])
+        except ZoneInfoNotFoundError:
+            with (Path(__file__).parent / 'zoneinfo' / 'America_Los_Angeles').open('rb') as stream:
+                zone = ZoneInfo.from_file(stream, key=ZONE[marketplace])
+    else:
+        zone = datetime.timezone(datetime.timedelta(hours=UTC_OFFSET[marketplace]))
     local = (now or datetime.datetime.now(UTC)).astimezone(zone)
     start = (local - datetime.timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
     interval = start.isoformat(timespec='seconds') + '--' + local.isoformat(timespec='seconds')
@@ -117,7 +126,7 @@ def sales(client, marketplace, days=14, now=None):
 
 def overview(client, marketplace, now=None):
     """Home page figures: a week of sales and the orders waiting to ship. Each part may fail on its own."""
-    spapi.marketplace_id(marketplace)
+    spapi.marketplace_id(marketplace, getattr(client, 'region', None))
     client.require()
     result = {'marketplace': marketplace}
     for name, read in (('sales', lambda: sales(client, marketplace, 7, now)), ('open_orders', lambda: orders(client, marketplace, 7, 'open', now))):
@@ -132,7 +141,7 @@ def overview(client, marketplace, now=None):
 
 # --- FBA stock (read-only) ------------------------------------------------------
 def fba_inventory(client, marketplace, skus=None):
-    market = spapi.marketplace_id(marketplace)
+    market = spapi.marketplace_id(marketplace, getattr(client, 'region', None))
     query = {'details': 'true', 'granularityType': 'Marketplace', 'granularityId': market, 'marketplaceIds': market}
     if skus:
         query['sellerSkus'] = ','.join(listings.clean_skus(skus, 50))
@@ -159,7 +168,7 @@ class Reports:
         self.items = {}
 
     def create(self, client, kind, marketplace, days=7, now=None):
-        market = spapi.marketplace_id(marketplace)
+        market = spapi.marketplace_id(marketplace, getattr(client, 'region', None))
         if kind not in REPORTS:
             raise ValueError('报告类型无效')
         report_type, label, dated = REPORTS[kind]
@@ -303,7 +312,7 @@ class Changes:
         self.log_path, self.clock = log_path, clock
 
     def preview(self, client, user, marketplace, items):
-        market, seller = spapi.marketplace_id(marketplace), client.seller_id()
+        market, seller = spapi.marketplace_id(marketplace, getattr(client, 'region', None)), client.seller_id()
         if not isinstance(items, list) or not 1 <= len(items) <= MAX_CHANGES:
             raise ValueError('一次预检 1 到 %d 个 SKU' % MAX_CHANGES)
         wanted, seen = [], set()

@@ -139,7 +139,7 @@ def editable_directory(root):
     db=library.connect(Path(root))
     try:
         groups={}
-        for row in db.execute('SELECT * FROM shop_registry ORDER BY shop,marketplace'):
+        for row in db.execute("SELECT * FROM shop_registry WHERE marketplace IN ('AE','SA') ORDER BY shop,marketplace"):
             item=groups.setdefault(row['shop'],{'shop':row['shop'],'ae':'','sa':''})
             item[row['marketplace'].lower()]=row['seller_id']
         return list(groups.values())
@@ -150,7 +150,7 @@ def editable_directory(root):
 def apply(db, records, bindings=()):
     for record in records:
         shop, market, fp, hint = (record.get(k) for k in ('shop', 'marketplace', 'fingerprint', 'account_hint'))
-        if not isinstance(shop, str) or not shop.strip() or len(shop) > 120 or shop == library.GLOBAL_SHOP or market not in ('AE', 'SA') or not isinstance(fp, str) or not re.fullmatch('[a-f0-9]{64}', fp) or not isinstance(hint, str) or len(hint) > 10:
+        if not isinstance(shop, str) or not shop.strip() or len(shop) > 120 or shop == library.GLOBAL_SHOP or market not in ('AE', 'SA', 'US') or not isinstance(fp, str) or not re.fullmatch('[a-f0-9]{64}', fp) or not isinstance(hint, str) or len(hint) > 10:
             raise ValueError('店铺对照记录格式无效')
         seller = record.get('seller_id', '')
         if not isinstance(seller, str) or (seller and fingerprint(seller) != fp):

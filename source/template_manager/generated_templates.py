@@ -167,8 +167,8 @@ class Service:
     def generate(self, user, body):
         owner = self._user(user);self._body(body)
         marketplace, product_type = body.get('marketplace'), body.get('product_type')
-        spapi.marketplace_id(marketplace)
         client = self._client(body)
+        spapi.marketplace_id(marketplace, getattr(client, 'region', None))
         seller = client.seller_id()
         if not isinstance(seller, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', seller):raise ValueError('当前连接没有可用的卖家来源标识')
         definition = self.definitions.definition(client, product_type, marketplace, force=True, strict=True)

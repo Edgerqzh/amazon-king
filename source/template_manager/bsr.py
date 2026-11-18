@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 import urllib.robotparser
 
-HOSTS = {'AE': 'www.amazon.ae', 'SA': 'www.amazon.sa'}
+HOSTS = {'AE': 'www.amazon.ae', 'SA': 'www.amazon.sa', 'US': 'www.amazon.com'}
 ASIN = re.compile(r'[A-Z0-9]{10}\Z')
 MAX_HTML = 4 * 1024 * 1024
 USER_AGENT = 'TemplateManagerBSR/1.0'
@@ -29,7 +29,7 @@ class BsrError(ValueError):
 
 def marketplace(value):
     if not isinstance(value, str) or value not in HOSTS:
-        raise ValueError('仅支持 AE、SA 站点')
+        raise ValueError('仅支持 AE、SA、US 站点')
     return value
 
 
@@ -50,6 +50,8 @@ def validate_url(value, market, kind='bsr', base=None):
         raise ValueError('Amazon 链接无效')
     if base:
         value = urllib.parse.urljoin(base, value)
+    if kind == 'search':
+        return validate_search_url(value, market)
     try:
         u = urllib.parse.urlsplit(value)
         if u.scheme != 'https' or u.username is not None or u.password is not None or u.port not in (None, 443):
@@ -96,6 +98,63 @@ def validate_url(value, market, kind='bsr', base=None):
 
 def category_url(url, market):
     return validate_url(url, market).split('?', 1)[0]
+
+
+def search_url(market, keyword, page=1):
+    marketplace(market)
+    if not isinstance(keyword, str) or not keyword.strip() or len(keyword) > 100 or re.search(r'[\x00-\x1f\x7f]', keyword):
+        raise ValueError('搜索关键词无效')
+    if type(page) is not int or not 1 <= page <= 5:
+        raise ValueError('搜索页码须为 1–5')
+    return 'https://' + HOSTS[market] + '/s?' + urllib.parse.urlencode({'k': keyword.strip(), 'page': page})
+
+
+def validate_search_url(value, market):
+    try:
+        u = urllib.parse.urlsplit(value)
+        pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+        query = dict(pairs)
+        if (u.scheme != 'https' or u.netloc != HOSTS[marketplace(market)] or u.path != '/s' or u.fragment
+                or len(pairs) != 2 or set(query) != {'k', 'page'} or query['page'] not in ('1', '2', '3', '4', '5')):
+            raise ValueError()
+        canonical = search_url(market, query['k'], int(query['page']))
+        if value != canonical:
+            raise ValueError()
+        return canonical
+    except (ValueError, KeyError, TypeError):
+        raise ValueError('只允许程序生成的所选站点 /s?k=关键词&page=1–5 搜索地址') from None
+
+
+def parse_search_page(html, market, source_url, fetched_at=None):
+    source_url = validate_search_url(source_url, market)
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(source_url).query))
+    root = Document(html).root
+    nodes = list(root.nodes())
+    cards = [n for n in nodes if n.attrs.get('data-component-type') == 's-search-result']
+    if len(cards) > 100:
+        raise BsrError('搜索结果卡片数量超过单页限制')
+    # An explicit no-results message is valid; an unrecognized empty shell is not.
+    if not cards and not any(n.attrs.get('data-component-type') == 's-search-results' and
+                            re.search(r'no results|did not match|没有结果|لم نعثر|لا توجد نتائج', n.text(), re.I) for n in nodes):
+        raise BsrError('未识别到搜索结果或明确的无结果提示；已停止，请检查页面。')
+    items = []
+    for position, card in enumerate(cards, 1):
+        value = card.attrs.get('data-asin', '')
+        if not ASIN.fullmatch(value):
+            continue
+        descendants = list(card.nodes())
+        title = next((n.text() for n in descendants if n.tag == 'h2' and n.text()), '')
+        title = title or next((n.attrs['alt'] for n in descendants if n.tag == 'img' and n.attrs.get('alt')), '')
+        price, currency, raw = _price(card, market)
+        sponsored = any(n.attrs.get('data-component-type') == 'sp-sponsored-result' or
+                        _has(n, 'puis-sponsored-label-text', 's-sponsored-label-text') or
+                        re.fullmatch(r'Sponsored|إعلان|برعاية|赞助', n.text(), re.I) for n in descendants)
+        items.append({'asin': value, 'title': title[:1000], 'url': product_url(market, value),
+                      'price': price, 'currency': currency, 'raw_price': raw, 'position': position, 'sponsored': sponsored})
+    if cards and not items:
+        raise BsrError('搜索卡片存在但没有有效 ASIN，未把解析失败视为无结果。')
+    return {'source': 'search', 'source_url': source_url, 'keyword': query['k'], 'page': int(query['page']),
+            'items': items, 'fetched_at': fetched_at or datetime.now(timezone.utc).isoformat()}
 
 
 def check_challenge(text):
@@ -175,7 +234,7 @@ def _has(node, *names):
     return any(c == n or c.startswith(n + '_') for c in node.classes() for n in names)
 
 
-def _price(card):
+def _price(card, market=None):
     nodes = list(card.nodes())
     whole = next((n.text() for n in nodes if _has(n, 'a-price-whole')), '')
     fraction = next((n.text() for n in nodes if _has(n, 'a-price-fraction')), '')
@@ -190,6 +249,8 @@ def _price(card):
         currencies.add('AED')
     if re.search(r'\bSAR\b|ر\.?س\.?|ر\.س', currency_text, re.I):
         currencies.add('SAR')
+    if (re.search(r'\bUSD\b|US\$', currency_text, re.I) or (market == 'US' and re.search(r'(?<![A-Za-z])\$', currency_text))) and not re.search(r'(?:S|SG|CA|C|AU|A|HK|NZ)\$', currency_text, re.I):
+        currencies.add('USD')
     currency = next(iter(currencies)) if len(currencies) == 1 else ''
     amount = ''
     if whole:
@@ -298,7 +359,7 @@ def parse_page(html, market, source_url, page=None, label='', fetched_at=None):
             title = next((n.attrs.get('alt', '') for n in descendants if n.tag == 'img' and n.attrs.get('alt')), '')
         if not title:
             title = next((n.text() for n, url in links if n.text() and not re.fullmatch(r'[\d\W]+', n.text())), '')
-        price, currency, raw = _price(card)
+        price, currency, raw = _price(card, market)
         items.append({'asin': value, 'title': title[:1000], 'url': product_url(market, value), 'price': price, 'currency': currency, 'raw_price': raw, 'rank': rank})
         if len(items) >= 100:
             break
@@ -337,14 +398,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class _Session:
-    def __init__(self, collector, market, cancel, checkpoint):
+    def __init__(self, collector, market, cancel, checkpoint, max_requests=12, max_seconds=150):
         self.collector, self.market, self.cancel, self.checkpoint = collector, market, cancel, checkpoint
         self.started, self.requests, self.robots = collector.clock(), 0, None
+        self.max_requests, self.max_seconds = max_requests, max_seconds
 
     def check(self):
         if self.cancel is not None and self.cancel.is_set():
             raise BsrError('采集已取消，已取得结果保留。', 'cancelled')
-        if self.collector.clock() - self.started > 150 or self.requests >= 12:
+        if self.collector.clock() - self.started > self.max_seconds or self.requests >= self.max_requests:
             raise BsrError('达到采集时间或请求数量上限，已停止。', 'partial')
 
     def fetch(self, url, kind='bsr', robots=False):
@@ -382,6 +444,8 @@ class _Session:
                     if status in (403, 429):
                         raise BsrError('Amazon 限制公开访问（HTTP %s），已停止，不重试。' % status, 'blocked')
                     if status in (301, 302, 303, 307, 308):
+                        if kind == 'search':
+                            raise BsrError('搜索页发生跳转，已停止，不跟随或重试。', 'blocked')
                         location = headers.get('Location', '')
                         try:
                             destination = validate_url(location, self.market, kind, url)
@@ -456,6 +520,28 @@ class Collector:
         if url != expected:
             raise BsrError('商品跳转改变目标 ASIN，无法确认其 BSR 类目。', 'blocked')
         return discover_categories(html, marketplace, url)
+
+    def search(self, marketplace, keywords, cancel=None, checkpoint=None):
+        if not isinstance(keywords, list) or not 1 <= len(keywords) <= 5:
+            raise ValueError('请提供 1–5 个搜索关键词')
+        words = list(dict.fromkeys(keywords))
+        # Validate the entire plan before issuing any network request.
+        for word in words:
+            search_url(marketplace, word)
+        session = _Session(self, marketplace, cancel, checkpoint, max_requests=27, max_seconds=480)
+        count, pages = 0, 0
+        for word in words:
+            for page in range(1, 6):
+                url = search_url(marketplace, word, page)
+                html, final_url = session.fetch(url, 'search')
+                parsed = parse_search_page(html, marketplace, final_url)
+                if checkpoint:
+                    checkpoint(parsed)
+                pages += 1
+                count += len(parsed['items'])
+                if not parsed['items']:
+                    break
+        return {'pages_done': pages, 'count': count}
 
     def collect(self, marketplace, url, cancel=None, checkpoint=None):
         url = validate_url(url, marketplace)
