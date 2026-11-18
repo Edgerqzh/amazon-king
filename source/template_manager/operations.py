@@ -30,6 +30,7 @@ REPORTS = {
     'listings': ('GET_MERCHANT_LISTINGS_ALL_DATA', '全部商品清单', False),
     'fba': ('GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA', '亚马逊物流库存', False),
     'orders': ('GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL', '订单明细（按下单日期）', True),
+    'returns': ('GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA', '亚马逊物流退货', True),
 }
 # Columns that describe a buyer or a delivery address are dropped from every report.
 PRIVATE_COLUMN = re.compile(r'^(buyer|recipient|ship-(address|city|state|postal|phone|country)|bill|customer|delivery-instructions|gift-message)', re.I)
@@ -183,7 +184,7 @@ class Reports:
         with self.lock:
             while len(self.items) >= 8:
                 del self.items[next(iter(self.items))]
-            self.items[report_id] = {'kind': kind, 'label': label, 'marketplace': marketplace, 'table': None, 'store': getattr(client, 'store_id', spapi.DEFAULT_STORE), 'store_name': getattr(client, 'label', spapi.DEFAULT_STORE_NAME)}
+            self.items[report_id] = {'kind': kind, 'label': label, 'marketplace': marketplace, 'days': days if dated else None, 'table': None, 'store': getattr(client, 'store_id', spapi.DEFAULT_STORE), 'store_name': getattr(client, 'label', spapi.DEFAULT_STORE_NAME)}
         return {'id': report_id, 'label': label, 'status': 'IN_QUEUE'}
 
     def entry(self, report_id, store=spapi.DEFAULT_STORE):

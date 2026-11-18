@@ -257,6 +257,9 @@ class Client:
         if live is True and method == 'PATCH' and path.startswith(LISTING_PATH) and 'mode' not in query:
             patches = body.get('patches') if isinstance(body, dict) else None
             return isinstance(patches, list) and bool(patches) and all(isinstance(p, dict) and p.get('op') == 'replace' and p.get('path') in LIVE_PATCH_PATHS for p in patches)
+        if live is True and method == 'POST' and re.fullmatch(r'/solicitations/v1/orders/\d{3}-\d{7}-\d{7}/solicitations/productReviewAndSellerFeedback', path):
+            # Amazon's standard review request for one order a person confirmed; it carries no text of ours.
+            return not body and set(query) == {'marketplaceIds'}
         if live is True and method == 'PUT' and path.startswith(LISTING_PATH) and 'mode' not in query:
             return isinstance(body, dict) and body.get('requirements') == 'LISTING' and isinstance(body.get('productType'), str) and bool(body['productType']) and isinstance(body.get('attributes'), dict) and bool(body['attributes'])
         return False

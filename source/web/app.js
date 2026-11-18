@@ -38,8 +38,9 @@ for(const [key,title,description] of [['library','模板库','团队保存的亚
 PAGES.generate={id:'generated-panel',title:'模板库',description:'按亚马逊最新字段规则生成填写表，在本软件预检并上架。',roles:['admin','editor']};
 const GROUPS={templates:['library','generate','import','batch','aliases','check'],settings:['connection','shops','ai','members','backup']};
 const SUB_LABELS={library:'全部模板',generate:'从规则生成',import:'上传模板',batch:'批量生成',aliases:'叫法归类',check:'与亚马逊对照',connection:'亚马逊连接',shops:'店铺',ai:'AI',members:'成员',backup:'备份'};
+PAGES.insights={id:'insights-panel',title:'店铺分析',description:'利润、退货、商品问题、入库货件，以及向买家请求评论。',roles:['admin','editor']};
 PAGES.lookalike={id:'lookalike-panel',title:'以图找同款',description:'上传商品图，找出亚马逊上的同款商品和各卖家的价格。',roles:['admin','editor','viewer']};
-const STORE_PAGES=['home','amazon','ops','orders','sales'];
+const STORE_PAGES=['home','amazon','ops','orders','sales','insights'];
 const STORE_SELECT_PAGES=[...STORE_PAGES,'fill','generate','check','connection','lookalike'];
 function renderSubnav(key){
   const pages=Object.values(GROUPS).find(group=>group.includes(key)),box=$('subnav');
@@ -1356,7 +1357,7 @@ function renderStoreSelect(){
 async function setStore(store){
   currentStore=store==='default'?'':store;try{if(currentStore)localStorage.setItem('store',currentStore);else localStorage.removeItem('store');}catch(e){/* ignore */}
   amazonStatus=null;for(const key of Object.keys(homeCache))delete homeCache[key];
-  ordersResult=null;opsResult=null;fbaResult=null;amazonResult=null;exportId=null;
+  ordersResult=null;opsResult=null;fbaResult=null;amazonResult=null;exportId=null;if(typeof window.resetWatch==='function')window.resetWatch();if(typeof window.resetInsights==='function')window.resetInsights();
   if(typeof resetPrecheck==='function')resetPrecheck();
   $('amazon-markets').replaceChildren();credAdding=false;
   await loadAmazonStatus();
@@ -1643,7 +1644,7 @@ $('check-run').addEventListener('click',()=>withButton($('check-run'),'正在对
     return box;
   }));
 }));
-$('logout').addEventListener('click',()=>{exportSequence++;clearTimeout(exportTimer);opsResult=null;ordersResult=null;fbaResult=null;exportId='';$('ops-lines').value='';renderOps();renderOrders();for(const id of ['fba-result','sales-result','export-result','check-result'])$(id).hidden=true;for(const id of ['ops-status','fba-status','orders-status-text','sales-status','export-status','check-status'])$(id).textContent='';$('ops-log').replaceChildren();$('export-create').disabled=false;});
+$('logout').addEventListener('click',()=>{exportSequence++;if(typeof window.resetWatch==='function')window.resetWatch();if(typeof window.resetInsights==='function')window.resetInsights();clearTimeout(exportTimer);opsResult=null;ordersResult=null;fbaResult=null;exportId='';$('ops-lines').value='';renderOps();renderOrders();for(const id of ['fba-result','sales-result','export-result','check-result'])$(id).hidden=true;for(const id of ['ops-status','fba-status','orders-status-text','sales-status','export-status','check-status'])$(id).textContent='';$('ops-log').replaceChildren();$('export-create').disabled=false;});
 
 // Listing a new product: only rows Amazon just validated, one confirmed SKU at a time.
 let fillSubmitItems=[];
@@ -1753,7 +1754,7 @@ for(const panel of document.querySelectorAll('.panel')){
   for(const note of notes){const fold=el('details','page-help'),summary=el('summary','','说明');note.before(fold);fold.append(summary,note);}
 }
 
-const MARKET_SELECTS=['amazon-market','ops-market','fba-market','orders-market','sales-market','export-market'];
+const MARKET_SELECTS=['amazon-market','ops-market','fba-market','watch-market','restock-market','insights-market','orders-market','sales-market','export-market'];
 let globalMarket='AE';
 try{if(['AE','SA','US'].includes(localStorage.getItem('market')))globalMarket=localStorage.getItem('market');}catch(e){/* storage may be unavailable */}
 for(const id of MARKET_SELECTS){const select=$(id);(select.parentElement.tagName==='LABEL'?select.parentElement:select).classList.add('market-synced');}
@@ -1764,6 +1765,7 @@ function setGlobalMarket(market,reload){
   for(const id of ['gen-market','look-market']){for(const option of $(id).options)option.disabled=!supported.includes(option.value);if(!supported.includes($(id).value))$(id).value=market;}
   globalMarket=market;try{localStorage.setItem('market',market);}catch(e){/* ignore */}
   for(const id of MARKET_SELECTS)$(id).value=market;
+  if(typeof window.onInsightsMarket==='function')window.onInsightsMarket(market);
   for(const button of document.querySelectorAll('#global-market [data-market]'))button.setAttribute('aria-pressed',String(button.dataset.market===market));
   if(!reload)return;
   const page=$('workspace').dataset.page;

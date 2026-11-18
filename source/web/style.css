@@ -712,3 +712,23 @@ a.kpi:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:var
 #lookalike-panel .inline-check{display:flex;align-items:flex-start;gap:8px;line-height:1.8;margin:14px 0;font-size:12px}
 #lookalike-panel input[type="checkbox"]{display:inline-block;width:16px;height:16px;flex:0 0 16px;margin:3px 0 0;accent-color:var(--accent)}
 #look-history-list{max-width:100%;min-width:220px}
+
+/* offers watch and restock */
+.watch-table td{white-space:normal;vertical-align:top}.watch-table small{display:block;color:var(--muted)}
+.watch-state,.restock-state{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+.state-bad{background:#fbe3df;color:#a12a1f}.state-warn{background:#fdf0d6;color:#8a5a00}.state-ok{background:#e1f2e6;color:#1d6b36}.state-dim{background:#ecebe7;color:#6b6862}
+.watch-new{color:#a12a1f;font-weight:600}
+.restock-fields{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.restock-summary{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 10px}
+@media (prefers-color-scheme:dark){.state-bad{background:#4a211c;color:#ff9b8f}.state-warn{background:#43361a;color:#f3c66b}.state-ok{background:#1f3a27;color:#7fd39a}.state-dim{background:#33312d;color:#a7a39b}.watch-new{color:#ff9b8f}}
+
+/* store analysis */
+.insights-market-label{display:block;max-width:160px;margin:0 0 10px}
+.insights-fields{grid-template-columns:repeat(auto-fit,minmax(170px,1fr));align-items:end}
+.insights-kpis{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 12px}
+.insights-kpi{border:1px solid var(--line);border-radius:12px;padding:8px 14px;min-width:120px}.insights-kpi span{display:block;font-size:12px;color:var(--muted)}.insights-kpi b{font-size:17px}
+.profit-costs textarea{width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+#insights-panel td{white-space:normal;vertical-align:top}#insights-panel td small{display:block;color:var(--muted)}
+.negative{color:#a12a1f}@media (prefers-color-scheme:dark){.negative{color:#ff9b8f}}
+.issue-line{margin:0 0 6px}.issue-line b{font-weight:600}
+#insights-panel td b,#insights-panel td.negative,#insights-panel td:not(:has(small)){white-space:nowrap}#insights-panel .issue-line b{white-space:normal}#insights-panel .inline-check{display:flex;align-items:center;gap:8px;align-self:center}

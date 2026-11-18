@@ -25,7 +25,7 @@ from template_manager import ai
 from template_manager import roster
 from template_manager import batch
 from template_manager import processing
-from template_manager import spapi, listings, operations, vault, generated_templates, lookalike, lookalike_history
+from template_manager import spapi, listings, operations, vault, generated_templates, lookalike, lookalike_history, watch, insights
 from template_manager.locks import LibraryLock
 
 WEB = Path(__file__).parent / 'web'
@@ -177,6 +177,8 @@ class Handler(BaseHTTPRequestHandler):
                           '/generated-templates.js': ('generated-templates.js', 'text/javascript; charset=utf-8'),
                           '/lookalike.js': ('lookalike.js', 'text/javascript; charset=utf-8'),
                           '/oauth.js': ('oauth.js', 'text/javascript; charset=utf-8'),
+                          '/watch.js': ('watch.js', 'text/javascript; charset=utf-8'),
+                          '/insights.js': ('insights.js', 'text/javascript; charset=utf-8'),
                           '/style.css': ('style.css', 'text/css; charset=utf-8')}
                 if path.path in assets:
                     name, mime = assets[path.path]
@@ -272,6 +274,77 @@ class Handler(BaseHTTPRequestHandler):
             self.send(operations.sales(client, market, body.get('days', 14)))
         elif route == 'fba-inventory':
             self.send(operations.fba_inventory(client, market, body.get('skus') or None))
+        elif route == 'offers-watch':
+            # Read-only: who sells on our own ASINs and who holds the Buy Box.
+            self.send(self.server.offers_watch.check(client, self.server.spapi_stores, market, body.get('asins')))
+        elif route == 'restock/start':
+            # Read-only: asks Amazon for the FBA order report the suggestion is built from.
+            days = body.get('days', 30)
+            if type(days) is not int or not 7 <= days <= 30:
+                raise ValueError('统计天数应为 7 到 30 之间的整数')
+            self.send(self.server.spapi_reports.create(client, 'orders', market, days))
+        elif route == 'restock':
+            reports = self.server.spapi_reports
+            state = reports.get(client, body.get('id'))
+            if state.get('status') != 'DONE':
+                self.send({k: state[k] for k in ('id', 'status', 'note') if k in state})
+            else:
+                entry = reports.entry(body.get('id'), getattr(client, 'store_id', spapi.DEFAULT_STORE))
+                if entry['kind'] != 'orders':
+                    raise ValueError('这不是订单报告，请重新生成补货建议')
+                days = entry.get('days', 30)
+                columns, rows = entry['table']
+                total, recent = watch.sold_per_sku(columns, rows, days)
+                stock = operations.fba_inventory(client, entry['marketplace'])
+                result = watch.restock(stock['items'], total, recent, days, body.get('lead_days', 30), body.get('cover_days', 30))
+                self.send({**result, 'status': 'DONE', 'marketplace': entry['marketplace'], 'stock_truncated': stock['truncated']})
+        elif route == 'insights/issues':
+            self.send(insights.listing_issues(client, market))
+        elif route == 'insights/inbound':
+            self.send(insights.inbound(client, market, body.get('days', 90)))
+        elif route == 'insights/costs':
+            store = getattr(client, 'store_id', spapi.DEFAULT_STORE)
+            if 'values' in body:
+                self.send({'costs': self.server.sku_costs.set(store, market, body.get('values'))})
+            else:
+                spapi.marketplace_id(market, getattr(client, 'region', None))
+                self.send({'costs': self.server.sku_costs.get(store, market)})
+        elif route == 'insights/profit':
+            spapi.marketplace_id(market, getattr(client, 'region', None))
+            shipments, refunds, services, truncated = insights.financial_events(client, body.get('days', 30))
+            vat = body.get('vat_rate')
+            if vat is not None and (type(vat) not in (int, float) or isinstance(vat, bool)):
+                raise ValueError('增值税率应为数字')
+            costs = self.server.sku_costs.get(getattr(client, 'store_id', spapi.DEFAULT_STORE), market)
+            result = insights.profit(shipments, refunds, services, market, costs, vat, body.get('vat_included', True) is not False)
+            self.send({**result, 'days': body.get('days', 30), 'truncated': truncated})
+        elif route == 'insights/returns/start':
+            days = body.get('days', 30)
+            reports = self.server.spapi_reports
+            self.send({'returns': reports.create(client, 'returns', market, days)['id'], 'orders': reports.create(client, 'orders', market, days)['id']})
+        elif route == 'insights/returns':
+            reports, store = self.server.spapi_reports, getattr(client, 'store_id', spapi.DEFAULT_STORE)
+            states = {key: reports.get(client, body.get(key)) for key in ('returns', 'orders')}
+            failed = next((s for s in states.values() if s.get('status') == 'FATAL'), None)
+            if states['returns'].get('status') == 'CANCELLED':
+                self.send({'status': 'DONE', 'empty': True, 'items': [], 'total_returned': 0, 'total_sold': 0, 'flagged': 0, 'reasons': [], 'marketplace': market})
+            elif failed is not None:
+                self.send({'status': failed['status'], 'note': failed.get('note', '')})
+            elif any(s.get('status') not in ('DONE', 'CANCELLED') for s in states.values()):
+                self.send({'status': 'IN_PROGRESS'})
+            else:
+                returned, ordered = reports.entry(body.get('returns'), store), reports.entry(body.get('orders'), store)
+                if returned['kind'] != 'returns' or ordered['kind'] != 'orders':
+                    raise ValueError('报告类型不对，请重新生成退货分析')
+                # A cancelled orders report means no orders in the period.
+                total = watch.sold_per_sku(*ordered['table'], ordered.get('days') or 30)[0] if ordered['table'] is not None else {}
+                result = insights.returns(*returned['table'], total)
+                self.send({**result, 'status': 'DONE', 'marketplace': returned['marketplace'], 'days': returned.get('days')})
+        elif route == 'reviews/orders':
+            self.send(self.server.reviews.candidates(client, market))
+        elif route == 'reviews/send':
+            # Sends Amazon's own review request for the orders a person ticked and confirmed.
+            self.send(self.server.reviews.send(client, name, market, body.get('orders'), body.get('confirmed')))
         elif route == 'report/create':
             self.send(self.server.spapi_reports.create(client, body.get('kind'), market, body.get('days', 7)))
         elif route == 'report':
@@ -720,6 +793,9 @@ def create_server(data_dir, port=8765, host='127.0.0.1', allowed_hosts=None, sch
     server.spapi_definitions = listings.Definitions()
     server.spapi_job_lock = threading.Lock()
     server.spapi_reports = operations.Reports()
+    server.offers_watch = watch.Offers(data_dir.parent / 'offers-watch.json')
+    server.sku_costs = insights.Costs(data_dir.parent / 'sku-costs.json')
+    server.reviews = insights.Reviews(data_dir.parent / 'review-requests.jsonl')
     server.spapi_changes = operations.Changes(data_dir.parent / 'amazon-changes.jsonl')
     server.library_lock = LibraryLock()
     server.generated_templates = generated_templates.Service(server.spapi, server.spapi_definitions, data_dir, server.library_lock, resolve=lambda store: server.spapi_stores.client(store if isinstance(store, str) else None))
