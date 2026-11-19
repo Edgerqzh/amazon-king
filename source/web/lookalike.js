@@ -155,14 +155,16 @@ $('look-prices').addEventListener('click',()=>lookRun($('look-prices'),'正在�
   $('look-status').textContent='第 4 步完成：已查 '+todo.length+' 个商品的价格。可以导出表格。';
   look.message=$('look-status').textContent;
 }));
-$('look-export').addEventListener('click',()=>{
+// CSV cell: quote when needed and neutralise spreadsheet formulas.
+const lookCsvCell=value=>{let text=String(value??'');if(/^[=+\-@\t\r]/.test(text))text="'"+text;return /[",\r\n]/.test(text)?'"'+text.replace(/"/g,'""')+'"':text;};
+$('look-export').addEventListener('click',()=>{try{
   const rows=[['哪张图','ASIN','标题','品牌','类目','AI判断','相似度','AI依据','依据','最低价','币种','购物车价','卖家数','我们的店铺','各卖家报价','链接']];
   for(const entry of lookQueue){
     const host={AE:'www.amazon.ae',SA:'www.amazon.sa',US:'www.amazon.com'}[entry.marketplace];
     for(const i of entry.items){const o=i.offers&&!i.offers.error?i.offers:null;rows.push([entry.name,i.asin,i.title,i.brand,i.category,LOOK_VERDICTS[i.verdict]||'未比对',i.similarity??'',i.ai_reason,(i.evidence||[]).join('；'),o?.lowest?o.lowest.total.toFixed(2):'',o?.lowest?.currency||'',o?.buy_box?o.buy_box.amount.toFixed(2):'',o?o.count:'',o?o.own_stores.join('、'):'',o?o.list.map(x=>(x.own_store||x.seller)+' '+x.total.toFixed(2)).join('；'):'','https://'+host+'/dp/'+i.asin]);}
   }
-  saveDownloadBlob(new Blob(['﻿'+rows.map(r=>r.map(csvCell).join(',')).join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'}),'以图找同款_'+look.marketplace+'.csv');
-});
+  saveDownloadBlob(new Blob(['﻿'+rows.map(r=>r.map(lookCsvCell).join(',')).join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'}),'以图找同款_'+(look.marketplace||'')+'.csv');
+}catch(error){notify('导出失败：'+error.message,true);}});
 async function lookHistoryList(){
   const epoch=lookEpoch,result=await request('/api/lookalike/history');
   if(epoch!==lookEpoch)return;
