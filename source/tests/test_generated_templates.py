@@ -57,7 +57,7 @@ class FakeClient:
             return {'productTypes': [{'name': 'SUITCASE', 'displayName': 'Suitcases', 'marketplaceIds': [MARKET]}], 'productTypeVersion': 'v1'}
         if path.startswith('/definitions/'):
             meta = {'productType': 'SUITCASE', 'displayName': 'Suitcases', 'marketplaceIds': [MARKET], 'requirements': 'LISTING', 'requirementsEnforced': 'ENFORCED',
-                    'productTypeVersion': {'number': 'version-1', 'latest': True},
+                    'productTypeVersion': {'version': 'version-1', 'latest': True, 'releaseCandidate': False},
                     'schema': {'checksum': base64.b64encode(hashlib.md5(self.raw()).digest()).decode(),
                                'link': {'resource': 'https://definitions.s3.amazonaws.com/schema.json?secret-signed-query=NEVER-IN-ARTIFACTS', 'verb': 'GET'}}}
             if self.meta_change:self.meta_change(meta)
@@ -136,7 +136,7 @@ class GenerationTests(unittest.TestCase):
     def test_generation_requires_strict_checksum_and_actual_context(self):
         changes = [lambda m:m.update(productType='OTHER'), lambda m:m.update(marketplaceIds=['wrong']), lambda m:m.update(requirements='LISTING_OFFER_ONLY'),
                    lambda m:m.update(requirementsEnforced='NOT_ENFORCED'), lambda m:m['productTypeVersion'].update(latest=False),
-                   lambda m:m['productTypeVersion'].pop('number'), lambda m:m['schema'].pop('checksum'), lambda m:m['schema']['link'].update(verb='POST'),
+                   lambda m:m['productTypeVersion'].pop('version'), lambda m:m['schema'].pop('checksum'), lambda m:m['schema']['link'].update(verb='POST'),
                    lambda m:m['schema'].update(checksum='not base64')]
         for change in changes:
             with self.subTest(change=change):
@@ -147,6 +147,12 @@ class GenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(spapi.SpApiError, '校验和'):self.generate()
         self.client.raw_change = None
         self.assertIsNotNone(self.generate()['token'])
+        # Hex-encoded MD5 and the older 'number' field are accepted too.
+        self.client.meta_change = lambda m:m['schema'].update(checksum=hashlib.md5(self.client.raw()).hexdigest())
+        self.assertEqual(self.generate()['version']['number'], 'version-1')
+        self.client.meta_change = lambda m:m.update(productTypeVersion={'number': 'legacy-1', 'latest': True})
+        self.assertEqual(self.generate()['version']['number'], 'legacy-1')
+        self.client.meta_change = None
 
     def test_empty_valid_workbook_enums_manifest_and_row1_source(self):
         preview = self.generate();token = preview['token']

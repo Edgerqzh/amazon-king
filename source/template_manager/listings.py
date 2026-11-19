@@ -238,6 +238,17 @@ def convert(values, fields, market, schema=None):
 
 
 # --- product type definitions (cached) --------------------------------------
+def _checksum_bytes(text):
+    """A schema checksum as raw digest bytes: hex or base64 (Amazon documents an MD5 digest; tolerate either encoding)."""
+    text = text.strip()
+    if re.fullmatch(r'[0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}', text):
+        return bytes.fromhex(text)
+    try:
+        return base64.b64decode(text, validate=True)
+    except (ValueError, TypeError):
+        return None
+
+
 class Definitions:
     """Seller-scoped, bounded TTL cache. Generation force-refreshes strict official metadata."""
 
@@ -290,6 +301,8 @@ class Definitions:
                            {'marketplaceIds': market, 'sellerId': seller, 'productTypeVersion': 'LATEST', 'requirements': 'LISTING', 'requirementsEnforced': 'ENFORCED', 'locale': 'en_US'})
         if not isinstance(meta, dict):raise spapi.SpApiError('亚马逊字段定义元数据格式异常')
         version = meta.get('productTypeVersion') or {}
+        # Amazon names the version string "version" (e.g. {"version": "U...", "latest": true}); older mocks used "number".
+        version_text = (version.get('version') or version.get('number')) if isinstance(version, dict) else None
         source = meta.get('schema') or {}
         if not isinstance(source, dict) or not isinstance(version, dict):raise spapi.SpApiError('亚马逊规则版本或下载元数据格式异常')
         link = source.get('link') or {}
@@ -298,7 +311,7 @@ class Definitions:
         if strict:
             if meta.get('productType') != product_type or meta.get('marketplaceIds') != [market] or meta.get('sellerId', seller) != seller or meta.get('requirements') != 'LISTING' or meta.get('requirementsEnforced') != 'ENFORCED':
                 raise spapi.SpApiError('亚马逊字段定义的类型、站点或要求上下文不符，未生成模板')
-            if not isinstance(version, dict) or not isinstance(version.get('number'), str) or not version['number'] or version.get('latest') is not True:
+            if not isinstance(version, dict) or not isinstance(version_text, str) or not version_text or version.get('latest') is not True:
                 raise spapi.SpApiError('亚马逊未返回已确认的最新规则版本')
             if link.get('verb') != 'GET' or not isinstance(checksum, str) or not checksum:
                 raise spapi.SpApiError('亚马逊规则缺少 GET 下载元数据或校验和')
@@ -306,11 +319,11 @@ class Definitions:
         schema_hash = ''
         if checksum is not None or strict:
             if not isinstance(checksum, str):raise spapi.SpApiError('亚马逊规则校验和格式异常')
-            try:expected = base64.b64decode(checksum, validate=True)
-            except (ValueError, TypeError):raise spapi.SpApiError('亚马逊规则校验和格式异常') from None
-            if len(expected) != 16:raise spapi.SpApiError('亚马逊规则校验和格式异常')
+            expected = _checksum_bytes(checksum)
+            algorithm = {16: 'md5', 20: 'sha1', 32: 'sha256'}.get(len(expected or b''))
+            if algorithm is None:raise spapi.SpApiError('亚马逊规则校验和格式异常')
             raw = client.fetch_raw(resource)
-            if not isinstance(raw, bytes) or not hmac.compare_digest(hashlib.md5(raw).digest(), expected):
+            if not isinstance(raw, bytes) or not hmac.compare_digest(hashlib.new(algorithm, raw).digest(), expected):
                 raise spapi.SpApiError('亚马逊规则校验和不符，未生成模板')
             schema_hash = hashlib.sha256(raw).hexdigest()
             try:schema = schema_utils.strict_json(raw, limit=16 * 1024 * 1024)
@@ -321,7 +334,7 @@ class Definitions:
             schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         if not isinstance(schema, dict):raise spapi.SpApiError('亚马逊字段定义格式异常')
         if client.seller_id() != seller:raise spapi.SpApiError('连接卖家已变更，请重新获取规则')
-        result = {'schema': schema, 'version': {'number': str(version.get('number') or ''), 'latest': bool(version.get('latest'))},
+        result = {'schema': schema, 'version': {'number': str(version_text or ''), 'latest': bool(version.get('latest'))},
                   'product_type': product_type, 'display_name': str(meta.get('displayName') or product_type)[:500], 'marketplace': marketplace,
                   'schema_sha256': schema_hash, 'checksum': checksum or '', 'fetched_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'requirements': meta.get('requirements', ''), 'requirements_enforced': meta.get('requirementsEnforced', ''), 'strict_verified': strict}
