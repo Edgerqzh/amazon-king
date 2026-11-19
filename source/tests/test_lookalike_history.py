@@ -76,6 +76,15 @@ class HistoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.history.save(VIEWER, {'entries': [entry]})
 
+    def test_table_export_keeps_numbers_and_neutralises_formulas(self):
+        import io as _io
+        import zipfile as _zip
+        data = lookalike_history.table({'rows': [['ASIN', 'price'], ['B000000001', 88.99], ['=HYPERLINK(1)', None]]})
+        sheet = _zip.ZipFile(_io.BytesIO(data)).read('xl/worksheets/sheet1.xml').decode()
+        self.assertIn('<v>88.99</v>', sheet);self.assertIn("'=HYPERLINK(1)", sheet)
+        for body in ({'rows': []}, {'rows': [[{'x': 1}]]}, {'rows': [['a'] * 41]}, {'rows': [['a']] * 3001}):
+            with self.assertRaises(ValueError):lookalike_history.table(body)
+
     def test_does_not_modify_template_database(self):
         path = Path(self.temp.name)/'templates.sqlite3'
         with sqlite3.connect(path) as connection:

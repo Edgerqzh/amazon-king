@@ -22,8 +22,8 @@ class Clock:
     def __call__(self):return self.now
 
 
-def item(asin, title, brand='Pilot', image=True):
-    return {'asin': asin, 'summaries': [{'marketplaceId': 'A2VIGQ35RCS4UG', 'itemName': title, 'brand': brand, 'browseClassification': {'displayName': 'Gel Pens'}}],
+def item(asin, title, brand='Pilot', image=True, category=('Gel Pens', '1234')):
+    return {'asin': asin, 'summaries': [{'marketplaceId': 'A2VIGQ35RCS4UG', 'itemName': title, 'brand': brand, 'browseClassification': {'displayName': category[0], 'classificationId': category[1]}}],
             'images': [{'marketplaceId': 'A2VIGQ35RCS4UG', 'images': [{'variant': 'MAIN', 'link': 'https://m.media-amazon.com/images/I/%s.jpg' % asin}] if image else []}]}
 
 
@@ -124,6 +124,27 @@ class LookalikeTests(unittest.TestCase):
         self.assertTrue(all(method == 'GET' for method, _, _ in client.calls))
         with self.assertRaises(spapi.SpApiError):
             self.service.prices(EDITOR, FakeClient([spapi.SpApiError('denied', 403)]), None, {'token': token, 'asins': ['B000000001']})
+
+    def test_ten_keywords_and_search_again_in_the_matches_category(self):
+        token = self.start()[0]['token']
+        words = ['pen %d' % n for n in range(10)]
+        client = FakeClient([{'items': [item('B000000001', 'Pilot black gel pen'), item('B000000002', 'Marker', category=('Markers', '99'))]}] + [{'items': []}] * 9)
+        self.service.search(EDITOR, client, {'token': token, 'keywords': words})
+        self.assertEqual(len(client.calls), 10)
+        with self.assertRaises(ValueError):self.service.search(EDITOR, client, {'token': token, 'keywords': words + ['pen x']})
+        with self.assertRaises(ValueError) as caught:self.service.widen(EDITOR, client, {'token': token})
+        self.assertIn('比图', str(caught.exception))
+        reply = {'items': [{'asin': 'B000000001', 'verdict': 'same', 'similarity': 95, 'reason': 'ok'}, {'asin': 'B000000002', 'verdict': 'different', 'similarity': 5, 'reason': 'no'}]}
+        with mock.patch.object(ai, 'request_json', return_value=reply):
+            self.service.compare(EDITOR, {'token': token, 'asins': ['B000000001', 'B000000002'], 'ai_consent': True})
+        client = FakeClient([{'items': [item('B000000009', 'Fine liner'), item('B000000001', 'Pilot black gel pen')]}] + [{'items': []}] * 9)
+        result = self.service.widen(EDITOR, client, {'token': token})
+        self.assertEqual(result['categories'], ['Gel Pens']);self.assertEqual(result['added'], 1);self.assertEqual(result['count'], 3)
+        # only the same-product's category is searched, never the "different" one's
+        self.assertTrue(all(call[2]['classificationIds'] == '1234' for call in client.calls))
+        rows = {r['asin']: r for r in result['items']}
+        self.assertEqual(rows['B000000001']['verdict'], 'same')  # earlier verdicts are kept
+        self.assertIn('Gel Pens', ' '.join(rows['B000000009']['evidence']))
 
     def test_job_expires_and_is_bounded(self):
         result, _ = self.start()

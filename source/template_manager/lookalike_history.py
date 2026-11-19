@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import io
 import json
+import math
 from pathlib import Path
 import re
 import sqlite3
@@ -95,6 +96,10 @@ def _xlsx(sheets):
                     while column:
                         column, remainder = divmod(column-1, 26)
                         letter = chr(65+remainder) + letter
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                        # Real numbers, so prices can be sorted and filtered in Excel.
+                        ET.SubElement(ET.SubElement(row_node, 'c', r=letter+str(r)), 'v').text = repr(value)
+                        continue
                     cell = ET.SubElement(row_node, 'c', r=letter+str(r), t='inlineStr')
                     inline = ET.SubElement(cell, 'is')
                     ET.SubElement(inline, 't', attrib={'xml:space': 'preserve'}).text = _xml_text(value)
@@ -105,6 +110,31 @@ def _xlsx(sheets):
         z.writestr('[Content_Types].xml', xml(types))
     return stream.getvalue()
 
+
+TABLE_ROWS = 3000
+TABLE_COLUMNS = 40
+TABLE_CELL = 5000
+
+
+def table(body):
+    """The rows the page is showing -> one Excel sheet. Text and numbers only; nothing is stored."""
+    rows = body.get('rows') if isinstance(body, dict) else None
+    if not isinstance(rows, list) or not 1 <= len(rows) <= TABLE_ROWS:
+        raise ValueError('表格行数须为 1–%d 行' % TABLE_ROWS)
+    clean = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) > TABLE_COLUMNS:
+            raise ValueError('表格每行最多 %d 列' % TABLE_COLUMNS)
+        cells = []
+        for value in row:
+            if value is None:value = ''
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                raise ValueError('表格单元格只能是文字或数字')
+            if isinstance(value, float) and not math.isfinite(value):value = ''
+            if isinstance(value, str):value = _csv_cell(value[:TABLE_CELL])
+            cells.append(value)
+        clean.append(cells)
+    return _xlsx([('以图找同款', clean)])
 
 class History:
     def __init__(self, path, service):

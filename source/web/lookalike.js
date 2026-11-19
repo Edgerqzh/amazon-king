@@ -19,8 +19,10 @@ function lookControls(){
   $('look-read').disabled=lookBusy||!has||!$('look-consent').checked;
   $('look-search').disabled=lookBusy||!look?.token||!$('look-keywords').value.trim();
   $('look-compare').disabled=lookBusy||!look?.token||!items.length||!$('look-consent').checked;
+  $('look-widen').disabled=lookBusy||!look?.token||!items.some(i=>i.verdict==='same'||i.verdict==='similar');
   $('look-prices').disabled=lookBusy||!look?.token||!items.some(i=>i.verdict==='same'||i.verdict==='similar'||i.picked);
   $('look-export').disabled=lookBusy||!lookQueue.some(entry=>entry.items.length);
+  if($('look-export-xlsx'))$('look-export-xlsx').disabled=$('look-export').disabled;
   $('look-next').hidden=lookQueue.length<2;
   $('look-next').disabled=lookBusy||lookIndex>=lookQueue.length-1;
   $('look-file').disabled=lookBusy;
@@ -35,10 +37,25 @@ function lookControls(){
   $('look-keywords').readOnly=!look?.token;$('look-keywords').disabled=lookBusy;
 }
 function lookMoney(m){return m?m.amount.toFixed(2)+' '+m.currency:'';}
-function lookShown(){
-  const filter=$('look-filter').value;
-  return (look?.items||[]).filter(i=>!filter||(filter==='match'?(i.verdict==='same'||i.verdict==='similar'):filter==='unchecked'?!i.verdict:true));
+// The price an item is filtered on: lowest offer (incl. shipping) or Buy Box; null when not queried.
+function lookPrice(item,basis){const o=item.offers&&!item.offers.error?item.offers:null;if(!o)return null;const v=basis==='buy_box'?o.buy_box?.amount:o.lowest?.total;return typeof v==='number'?v:null;}
+function lookPriceRule(){
+  const op=$('look-price-op').value,raw=$('look-price-value').value.trim(),value=Number(raw);
+  return op&&raw!==''&&Number.isFinite(value)?{op,value,basis:$('look-price-basis').value}:null;
 }
+// One filter for both the table and the export, so the Excel holds exactly what is on screen.
+function lookPasses(item){
+  const filter=$('look-filter').value;
+  if(filter==='match'&&item.verdict!=='same'&&item.verdict!=='similar')return false;
+  if(filter==='unchecked'&&item.verdict)return false;
+  const rule=lookPriceRule();if(!rule)return true;
+  const price=lookPrice(item,rule.basis);if(price==null)return false;
+  const a=Math.round(price*100),b=Math.round(rule.value*100);
+  return {gt:a>b,ge:a>=b,eq:a===b,le:a<=b,lt:a<b}[rule.op];
+}
+const LOOK_ORDER={same:0,similar:1,'':2,different:3};
+function lookSorted(items){return items.filter(lookPasses).sort((a,b)=>(LOOK_ORDER[a.verdict||'']-LOOK_ORDER[b.verdict||''])||((b.similarity??-1)-(a.similarity??-1))||((b.found_by||[]).length-(a.found_by||[]).length));}
+function lookShown(){return (look?.items||[]).filter(lookPasses);}
 function lookSelect(index){
   if(lookBusy)return;
   if(look)look.keywords=$('look-keywords').value;
@@ -56,13 +73,11 @@ function lookSelect(index){
 }
 function lookRender(){
   const items=lookQueue.flatMap(entry=>entry.items);$('look-results').hidden=!items.length;
-  const order={same:0,similar:1,'':2,different:3};
-  const rows=[];
+  const rows=[];let shownTotal=0;
   for(const entry of lookQueue){
     if(!entry.items.length)continue;
-    const header=el('tr','look-group'),heading=cell(header,entry.name+' · '+entry.items.length+' 个候选');heading.colSpan=6;rows.push(header);
-    const filter=$('look-filter').value;
-    const shown=entry.items.filter(i=>!filter||(filter==='match'?(i.verdict==='same'||i.verdict==='similar'):filter==='unchecked'?!i.verdict:true)).sort((a,b)=>(order[a.verdict||'']-order[b.verdict||''])||((b.similarity??-1)-(a.similarity??-1))||(b.found_by.length-a.found_by.length));
+    const shown=lookSorted(entry.items);shownTotal+=shown.length;
+    const header=el('tr','look-group'),heading=cell(header,entry.name+' · '+entry.items.length+' 个候选'+(shown.length!==entry.items.length?'，筛选后 '+shown.length+' 个':''));heading.colSpan=6;rows.push(header);
     rows.push(...shown.map(item=>{
     const tr=el('tr','look-'+(item.verdict||'pending'));
     const pick=el('input');pick.type='checkbox';pick.checked=!!item.picked;pick.setAttribute('aria-label','选择 '+item.asin);
@@ -90,7 +105,7 @@ function lookRender(){
     }));
   }
   $('look-rows').replaceChildren(...rows);
-  $('look-count').textContent='共 '+items.length+' 个候选，已比对 '+items.filter(i=>i.verdict).length+' 个，同款 '+items.filter(i=>i.verdict==='same').length+' 个，相似 '+items.filter(i=>i.verdict==='similar').length+' 个。';
+  $('look-count').textContent='共 '+items.length+' 个候选，已比对 '+items.filter(i=>i.verdict).length+' 个，同款 '+items.filter(i=>i.verdict==='same').length+' 个，相似 '+items.filter(i=>i.verdict==='similar').length+' 个。'+(shownTotal!==items.length?'当前筛选显示 '+shownTotal+' 个。':'')+(lookPriceRule()?'价格筛选只保留已查价格的商品。':'');
   lookControls();
 }
 async function lookRun(button,label,work){
@@ -120,12 +135,12 @@ $('look-read').addEventListener('click',()=>lookRun($('look-read'),'AI 正在看
   Object.assign(look,{token:result.token,marketplace:result.marketplace,items:[],keywords:result.keywords.join('\n'),description:[result.description,result.brand?'图上品牌：'+result.brand:''].filter(Boolean).join(' · ')});
   $('look-keywords').value=result.keywords.join('\n');
   $('look-description').textContent=[result.description,result.brand?'图上品牌：'+result.brand:''].filter(Boolean).join(' · ');
-  $('look-status').textContent='第 1 步完成：可以先改核心词（每行一个，最多 5 个），再点“用核心词搜索”。';
+  $('look-status').textContent='第 1 步完成：可以先改核心词或自己补几个（每行一个，最多 10 个），再点“用核心词搜索”。';
   look.message=$('look-status').textContent;
 }));
 $('look-search').addEventListener('click',()=>lookRun($('look-search'),'正在搜索亚马逊目录…',async epoch=>{
   const keywords=$('look-keywords').value.split(/[\r\n]+/).map(s=>s.trim()).filter(Boolean);
-  if(keywords.length>5)throw new Error('核心词最多 5 个');
+  if(keywords.length>10)throw new Error('核心词最多 10 个');
   const result=await postJSON('/api/lookalike/search',{token:look.token,keywords,store:look.store});
   if(epoch!==lookEpoch)return;
   look.items=result.items;lookRender();
@@ -144,6 +159,14 @@ $('look-compare').addEventListener('click',()=>lookRun($('look-compare'),'AI 正
   }
   $('look-status').textContent='第 3 步完成：同款 '+look.items.filter(i=>i.verdict==='same').length+' 个，相似 '+look.items.filter(i=>i.verdict==='similar').length+' 个。AI 的判断要人工确认；下一步查价格。';
 }));
+$('look-widen').addEventListener('click',()=>lookRun($('look-widen'),'正在同类目里再搜…',async epoch=>{
+  const result=await postJSON('/api/lookalike/widen',{token:look.token,store:look.store});
+  if(epoch!==lookEpoch)return;
+  const old=new Map(look.items.map(i=>[i.asin,i]));
+  look.items=result.items.map(row=>{const was=old.get(row.asin);return was?Object.assign(was,row,{picked:was.picked}):row;});lookRender();
+  $('look-status').textContent='在 '+result.categories.map(c=>'「'+c+'」').join('、')+' 里再搜了一轮，新找到 '+result.added+' 个候选，现在共 '+result.count+' 个。'+(result.errors.length?' '+result.errors.join('；'):'')+(result.added?' 新找到的还没比对，可以再点“AI 逐个比图”。':'');
+  look.message=$('look-status').textContent;
+}));
 $('look-prices').addEventListener('click',()=>lookRun($('look-prices'),'正在查价格…',async epoch=>{
   const todo=look.items.filter(i=>i.picked||i.verdict==='same'||i.verdict==='similar').slice(0,30);
   for(let i=0;i<todo.length;i+=10){
@@ -157,14 +180,31 @@ $('look-prices').addEventListener('click',()=>lookRun($('look-prices'),'正在�
 }));
 // CSV cell: quote when needed and neutralise spreadsheet formulas.
 const lookCsvCell=value=>{let text=String(value??'');if(/^[=+\-@\t\r]/.test(text))text="'"+text;return /[",\r\n]/.test(text)?'"'+text.replace(/"/g,'""')+'"':text;};
-$('look-export').addEventListener('click',()=>{try{
+// The rows currently shown (same filter and order as the table); prices and counts stay numbers.
+function lookTableRows(){
   const rows=[['哪张图','ASIN','标题','品牌','类目','AI判断','相似度','AI依据','依据','最低价','币种','购物车价','卖家数','我们的店铺','各卖家报价','链接']];
   for(const entry of lookQueue){
     const host={AE:'www.amazon.ae',SA:'www.amazon.sa',US:'www.amazon.com'}[entry.marketplace];
-    for(const i of entry.items){const o=i.offers&&!i.offers.error?i.offers:null;rows.push([entry.name,i.asin,i.title,i.brand,i.category,LOOK_VERDICTS[i.verdict]||'未比对',i.similarity??'',i.ai_reason,(i.evidence||[]).join('；'),o?.lowest?o.lowest.total.toFixed(2):'',o?.lowest?.currency||'',o?.buy_box?o.buy_box.amount.toFixed(2):'',o?o.count:'',o?o.own_stores.join('、'):'',o?o.list.map(x=>(x.own_store||x.seller)+' '+x.total.toFixed(2)).join('；'):'','https://'+host+'/dp/'+i.asin]);}
+    for(const i of lookSorted(entry.items)){const o=i.offers&&!i.offers.error?i.offers:null;rows.push([entry.name,i.asin,i.title||'',i.brand||'',i.category||'',LOOK_VERDICTS[i.verdict]||'未比对',i.similarity??'',i.ai_reason||'',(i.evidence||[]).join('；'),o?.lowest?o.lowest.total:'',o?.lowest?.currency||'',o?.buy_box?o.buy_box.amount:'',o?o.count:'',o?o.own_stores.join('、'):'',o?o.list.map(x=>(x.own_store||x.seller)+' '+x.total.toFixed(2)).join('；'):'','https://'+host+'/dp/'+i.asin]);}
   }
-  saveDownloadBlob(new Blob(['﻿'+rows.map(r=>r.map(lookCsvCell).join(',')).join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'}),'以图找同款_'+(look.marketplace||'')+'.csv');
+  return rows;
+}
+$('look-export').addEventListener('click',()=>{try{
+  const rows=lookTableRows();if(rows.length<2)throw new Error('当前筛选下没有商品');
+  saveDownloadBlob(new Blob(['﻿'+rows.map(r=>r.map(lookCsvCell).join(',')).join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'}),'以图找同款_'+(look?.marketplace||'')+'.csv');
 }catch(error){notify('导出失败：'+error.message,true);}});
+$('look-export-xlsx').addEventListener('click',async()=>{
+  const button=$('look-export-xlsx');if(button.disabled)return;
+  try{
+    const rows=lookTableRows();if(rows.length<2)throw new Error('当前筛选下没有商品');
+    button.disabled=true;
+    const response=await fetch('/api/lookalike/table',{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify({rows})});
+    if(!response.ok){let message='导出失败';try{message=(await response.json()).error||message;}catch(e){/* not JSON */}throw new Error(message);}
+    saveDownloadBlob(await response.blob(),'以图找同款_'+(look?.marketplace||'')+'_'+(rows.length-1)+'个.xlsx');
+  }catch(error){notify('导出失败：'+error.message,true);}finally{lookControls();}
+});
+for(const id of ['look-price-basis','look-price-op'])$(id).addEventListener('change',lookRender);
+$('look-price-value').addEventListener('input',lookRender);
 async function lookHistoryList(){
   const epoch=lookEpoch,result=await request('/api/lookalike/history');
   if(epoch!==lookEpoch)return;

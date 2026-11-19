@@ -25,9 +25,13 @@ from . import ai, spapi
 
 MAX_IMAGE = 4 * 1024 * 1024
 MIMES = {b'\xff\xd8\xff': 'image/jpeg', b'\x89PNG\r\n\x1a\n': 'image/png', b'RIFF': 'image/webp'}
-MAX_KEYWORDS = 5
-SEARCH_PAGES = 2          # 20 results per page
-MAX_CANDIDATES = 120
+AI_KEYWORDS = 5           # how many the AI suggests; people may add their own up to MAX_KEYWORDS
+MAX_KEYWORDS = 10
+SEARCH_PAGES = 5          # 20 results per page
+MAX_CANDIDATES = 300
+CATEGORY_LIMIT = 3        # 'search again inside the matches' categories': at most this many categories
+CATEGORY_PAGES = 2
+WIDEN_CANDIDATES = 450    # the category round may grow the list up to this many
 COMPARE_BATCH = 8
 PRICE_BATCH = 10
 OFFERS_INTERVAL = 2.1     # the item offers operation allows about one request every two seconds
@@ -165,21 +169,15 @@ class Service:
             self.jobs[token] = {'owner': owner, 'marketplace': market, 'mime': mime, 'image': data, 'brand': brand[:100],
                                 'description': description[:300], 'created_at': datetime.now(timezone.utc).isoformat(),
                                 'keywords': [], 'candidates': {}, 'store': None, 'expires': self.clock() + TOKEN_LIFE}
-        return {'token': token, 'marketplace': market, 'description': description[:300], 'brand': brand[:100], 'keywords': words[:MAX_KEYWORDS]}
+        return {'token': token, 'marketplace': market, 'description': description[:300], 'brand': brand[:100], 'keywords': words[:AI_KEYWORDS]}
 
     # --- step 2 -------------------------------------------------------------
-    def search(self, user, client, body):
-        """Search the catalog with each core keyword and merge the results by ASIN."""
-        owner = _user(user)
-        job = self._job(owner, body.get('token'))
-        words = _keywords(body.get('keywords'))
-        market = job['marketplace']
-        market_id = spapi.marketplace_id(market, getattr(client, 'region', None))
-        found, errors = {}, []
+    def _collect(self, client, market_id, words, found, errors, limit, pages, extra=None, label=''):
+        """Catalog keyword search, merged into found by ASIN. extra adds query fields (e.g. classificationIds)."""
         for word in words:
             position, page_token = 0, None
-            for page in range(SEARCH_PAGES):
-                query = {'marketplaceIds': market_id, 'keywords': ','.join(word.split()), 'includedData': 'summaries,images', 'pageSize': 20}
+            for page in range(pages):
+                query = {'marketplaceIds': market_id, 'keywords': ','.join(word.split()), 'includedData': 'summaries,images', 'pageSize': 20, **(extra or {})}
                 if page_token:
                     query['pageToken'] = page_token
                 try:
@@ -187,7 +185,7 @@ class Service:
                 except spapi.SpApiError as e:
                     if e.status in (None, 401, 403):
                         raise
-                    errors.append('「%s」第 %d 页查询失败：%s' % (word, page + 1, e))
+                    errors.append('%s「%s」第 %d 页查询失败：%s' % (label, word, page + 1, e))
                     break
                 for item in reply.get('items') or []:
                     if not isinstance(item, dict) or not isinstance(item.get('asin'), str) or not re.fullmatch(r'[A-Z0-9]{10}', item['asin']):
@@ -195,29 +193,73 @@ class Service:
                     position += 1
                     row = found.get(item['asin'])
                     if row is None:
-                        if len(found) >= MAX_CANDIDATES:
+                        if len(found) >= limit:
                             continue
                         summary = next((s for s in item.get('summaries') or [] if isinstance(s, dict) and s.get('marketplaceId') == market_id), None) or next(iter(item.get('summaries') or []), {}) or {}
                         pictures = next((g.get('images') for g in item.get('images') or [] if isinstance(g, dict) and g.get('marketplaceId') == market_id), None) or next((g.get('images') for g in item.get('images') or [] if isinstance(g, dict)), None) or []
                         main = next((p for p in pictures if isinstance(p, dict) and p.get('variant') == 'MAIN'), None) or next((p for p in pictures if isinstance(p, dict)), {})
                         classification = summary.get('browseClassification') if isinstance(summary.get('browseClassification'), dict) else {}
+                        category_id = classification.get('classificationId')
                         row = found[item['asin']] = {
                             'asin': item['asin'], 'title': str(summary.get('itemName') or '')[:500], 'brand': str(summary.get('brand') or '')[:100],
                             'category': str(classification.get('displayName') or '')[:200], 'image': _image_link(main.get('link')),
+                            'category_id': category_id if isinstance(category_id, str) and re.fullmatch(r'[0-9]{1,20}', category_id) else '',
                             'found_by': [], 'best_position': None, 'verdict': '', 'similarity': None, 'ai_reason': '', 'offers': None}
+                        if label:
+                            row['via_category'] = label
                     if word not in row['found_by']:
                         row['found_by'].append(word)
-                    if row['best_position'] is None or position < row['best_position'][0]:
+                    if not label and (row['best_position'] is None or position < row['best_position'][0]):
                         row['best_position'] = [position, word]
                 page_token = (reply.get('pagination') or {}).get('nextToken') if isinstance(reply.get('pagination'), dict) else None
                 if not page_token:
                     break
-        with self.lock:
-            job.update(keywords=words, candidates=found, store=getattr(client, 'store_id', spapi.DEFAULT_STORE), queried_at=datetime.now(timezone.utc).isoformat())
+
+    def _rows(self, job, found):
         rows = sorted(found.values(), key=lambda r: (-len(r['found_by']), r['best_position'][0] if r['best_position'] else 999))
         for row in rows:
             self._evidence(job, row)
+        return rows
+
+    def search(self, user, client, body):
+        """Search the catalog with each core keyword and merge the results by ASIN."""
+        owner = _user(user)
+        job = self._job(owner, body.get('token'))
+        words = _keywords(body.get('keywords'))
+        market_id = spapi.marketplace_id(job['marketplace'], getattr(client, 'region', None))
+        found, errors = {}, []
+        self._collect(client, market_id, words, found, errors, MAX_CANDIDATES, SEARCH_PAGES)
+        with self.lock:
+            job.update(keywords=words, candidates=found, store=getattr(client, 'store_id', spapi.DEFAULT_STORE), queried_at=datetime.now(timezone.utc).isoformat())
+        rows = self._rows(job, found)
         return {'token': body.get('token'), 'keywords': words, 'count': len(rows), 'items': rows, 'errors': errors}
+
+    def widen(self, user, client, body):
+        """Search again with the same keywords, but only inside the Amazon categories of the items the AI judged the same or similar.
+
+        Finds look-alikes whose titles are worded differently. Existing candidates and their verdicts are kept.
+        """
+        owner = _user(user)
+        job = self._job(owner, body.get('token'))
+        if not job['keywords']:
+            raise ValueError('请先用核心词搜索')
+        found = job['candidates']
+        counts = {}
+        for row in found.values():
+            if row.get('verdict') in ('same', 'similar') and row.get('category_id'):
+                key = (row['category_id'], row.get('category') or row['category_id'])
+                counts[key] = counts.get(key, 0) + (2 if row['verdict'] == 'same' else 1)
+        if not counts:
+            raise ValueError('还没有 AI 判为同款或相似、且带亚马逊类目的商品。请先让 AI 比图')
+        categories = sorted(counts, key=lambda k: -counts[k])[:CATEGORY_LIMIT]
+        market_id = spapi.marketplace_id(job['marketplace'], getattr(client, 'region', None))
+        before, errors = len(found), []
+        for category_id, name in categories:
+            self._collect(client, market_id, job['keywords'], found, errors, WIDEN_CANDIDATES, CATEGORY_PAGES,
+                          extra={'classificationIds': category_id}, label='类目「%s」' % name)
+        rows = self._rows(job, found)
+        return {'token': body.get('token'), 'categories': [name for _, name in categories], 'added': len(found) - before,
+                'count': len(rows), 'items': rows, 'errors': errors}
 
     def _evidence(self, job, row):
         """Notes built from facts we hold, so each one can be checked."""
@@ -230,6 +272,8 @@ class Service:
             notes.append('标题包含核心词：' + '、'.join(words))
         if job['brand'] and row['brand']:
             notes.append('品牌与图片相同：' + row['brand'] if job['brand'].casefold() == row['brand'].casefold() else '品牌不同：%s（图片上是 %s）' % (row['brand'], job['brand']))
+        if row.get('via_category'):
+            notes.append('在同款所在的%s里再搜时找到' % row['via_category'])
         if not row['image']:
             notes.append('亚马逊没有提供主图，无法比图')
         row['evidence'] = notes

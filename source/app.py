@@ -493,10 +493,16 @@ class Handler(BaseHTTPRequestHandler):
                     self.send(service.keywords(current_user, body))
                 elif action == 'search':
                     self.send(service.search(current_user, self.spapi_client(body.get('store')), body))
+                elif action == 'widen':
+                    self.send(service.widen(current_user, self.spapi_client(body.get('store')), body))
                 elif action == 'compare':
                     self.send(service.compare(current_user, body))
                 elif action == 'prices':
                     self.send(service.prices(current_user, self.spapi_client(body.get('store')), self.server.spapi_stores, body))
+                elif action == 'table':
+                    # Excel of the rows currently shown on the page; built from what the browser sends, nothing stored.
+                    data = lookalike_history.table(body)
+                    self.send(data, mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename='以图找同款.xlsx')
                 elif action in ('history/save', 'history/delete'):
                     self.send(getattr(self.server.lookalike_history, action.split('/')[1])(current_user, body))
                 else:

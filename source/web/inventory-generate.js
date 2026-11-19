@@ -44,13 +44,22 @@ async function invGenRematch(){
     select.value=target;updateInventoryShopOptions();
     notify('表格已存到店铺“'+target+'”，库存识别已切换到这个店铺');
   }
-  if(!$('inventory-file').files.length){notify('表格已存入模板库。重新选择这份库存后识别，就能直接下载。');return;}
+  if(!$('inventory-file').files.length||$('inventory-file').files[0]!==inspectedFile){notify('表格已存入模板库。重新选择这份库存后识别，就能直接下载。');return;}
+  notify('表格已存入模板库，正在重新匹配…');
   inventoryLocalRecheck=true;$('inventory-form').requestSubmit($('inventory-form').querySelector('button[type="submit"]'));
 }
+// Every click ends in visible feedback: a status under the category, a notice, or a re-match.
 async function invGenRun(work,rematch){
-  if(invGen.running||busy)return;invGen.running=true;invGenRefresh();
-  try{await work();}finally{invGen.running=false;}
-  if(rematch)await invGenRematch();else invGenRefresh();
+  if(invGen.running){notify('正在处理上一步，请稍等',true);return;}
+  if(busy){notify('库存识别还在进行中，请等它完成后再点',true);return;}
+  invGen.running=true;
+  const savedBefore=[...invGen.state.values()].filter(e=>e.saved).length;
+  try{invGenRefresh();await work();}
+  catch(error){notify('出错了：'+(error?.message||error),true);}
+  finally{invGen.running=false;}
+  const savedNow=[...invGen.state.values()].filter(e=>e.saved).length;
+  try{if(rematch&&savedNow>savedBefore)await invGenRematch();else invGenRefresh();}
+  catch(error){notify('表格已存入模板库，但重新匹配出错：'+(error?.message||error)+'。请点“识别类别并匹配表格”重新识别',true);}
 }
 function invGenError(message){
   if(/卖家记号不一致|另一个店铺/.test(message))return message+'。请在右上角切换到这个店铺的亚马逊连接后再生成。';
