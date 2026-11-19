@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -134,6 +135,15 @@ class AITests(unittest.TestCase):
         self.assertEqual(result['ai_summary']['completed'], 0)
         self.assertEqual(result['summary']['review'], 2)
         self.assertEqual(call.call_count, 1)
+
+    def test_network_failure_says_why_and_which_proxy(self):
+        with patch.dict(os.environ, {'HTTPS_PROXY': 'http://user:pw@127.0.0.1:7897'}), patch('urllib.request.urlopen', side_effect=urllib.error.URLError(TimeoutError('timed out'))):
+            with self.assertRaises(ValueError) as caught:ai.request_json(self.settings, 'sys', {'a': 1})
+        text = str(caught.exception)
+        self.assertIn('60 秒内没有收到回复', text);self.assertIn('经代理 http://127.0.0.1:7897', text);self.assertNotIn('pw', text)
+        with patch.dict(os.environ, {'HTTPS_PROXY': ''}), patch('urllib.request.getproxies', return_value={}), patch('urllib.request.urlopen', side_effect=urllib.error.URLError(ConnectionRefusedError('refused'))):
+            with self.assertRaises(ValueError) as caught:ai.request_json(self.settings, 'sys', {'a': 1})
+        self.assertIn('ConnectionRefusedError', str(caught.exception));self.assertIn('未使用代理', str(caught.exception))
 
     def test_ai_limits_and_manual_confirmation_not_rebilled(self):
         data = 'SKU,品名\n1,物品A\n2,物品B\n'.encode()

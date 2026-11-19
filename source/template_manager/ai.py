@@ -202,6 +202,23 @@ def images_for_rows(data, filename, sheet_name, rows):
     return images, sorted(set(warnings))
 
 
+def _open(request, timeout):
+    # Rebuild the opener each call so a proxy turned on (or changed) after the program started is used.
+    urllib.request.install_opener(urllib.request.build_opener())
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _network_reason(error, timeout):
+    """Why a request never got an HTTP answer, plus which proxy was in effect (no secrets involved)."""
+    reason = getattr(error, 'reason', error)
+    if isinstance(reason, TimeoutError) or 'timed out' in str(reason).lower():
+        why = '%d 秒内没有收到回复' % timeout
+    else:
+        why = re.sub(r'[\x00-\x1f\x7f]', ' ', (type(reason).__name__ + ': ' + str(reason)))[:200]
+    proxy = urllib.request.getproxies().get('https')
+    return why + '；' + ('经代理 ' + re.sub(r'//[^/@]*@', '//', proxy) if proxy else '未使用代理')
+
+
 def _json_chat_payload(provider_id, model, messages, output_limit):
     payload = {
         'model': model,
@@ -245,7 +262,7 @@ def classify(settings, products, templates, images):
     payload = _json_chat_payload(provider_id, model, messages, 3000)
     request = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+key}, method='POST')
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with _open(request, 60) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
             if len(raw) > 2 * 1024 * 1024:
                 raise ValueError('AI 响应过大')
@@ -262,8 +279,8 @@ def classify(settings, products, templates, images):
             value=re.sub(r'\bsk-[A-Za-z0-9_-]{8,}','[密钥已隐藏]',value)
             return re.sub(r'[\x00-\x1f\x7f]',' ',value)[:500]
         raise ValueError(f"{provider['name']} 请求失败（HTTP {e.code}）；错误码：{redact(code)}；说明：{redact(message)}；模型：{redact(model)}；接口：{endpoint}。请按错误码核对区域、模型可用性和权限。") from None
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise ValueError('AI 服务连接失败或超时，请检查服务器网络；未分析的行仍保留待确认') from None
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise ValueError('AI 服务连接失败或超时（' + _network_reason(error, 60) + '），请检查运行本软件那台电脑的网络；未分析的行仍保留待确认') from None
     try:
         result = json.loads(raw)
         answer = result['choices'][0]['message']['content']
@@ -467,7 +484,7 @@ def request_json(settings, system, user, max_tokens=6000, images=None):
     payload = _json_chat_payload(provider_id, model, messages, max_tokens)
     request=urllib.request.Request(endpoint,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+key},method='POST')
     try:
-        with urllib.request.urlopen(request,timeout=120 if images else 60) as response:raw=response.read(2*1024*1024+1)
+        with _open(request,120 if images else 60) as response:raw=response.read(2*1024*1024+1)
         if len(raw)>2*1024*1024:raise ValueError('AI 响应过大，未采用生成内容')
     except urllib.error.HTTPError as error:
         try:
@@ -478,7 +495,7 @@ def request_json(settings, system, user, max_tokens=6000, images=None):
             value=value.replace(key,'[密钥已隐藏]');value=re.sub(r'(?i)Bearer\s+[^\s"<>]+','Bearer [已隐藏]',value);value=re.sub(r'\bsk-[A-Za-z0-9_-]{8,}','[密钥已隐藏]',value)
             return re.sub(r'[\x00-\x1f\x7f]',' ',value)[:500]
         raise ValueError(f"{PROVIDERS[provider_id]['name']} 文案生成失败（HTTP {error.code}）；错误码：{redact(code)}；说明：{redact(message)}；模型：{redact(model)}；接口：{endpoint}") from None
-    except (urllib.error.URLError,TimeoutError,OSError):raise ValueError('AI 文案服务连接失败或超时；未采用未完成内容，请检查网络后重试') from None
+    except (urllib.error.URLError,TimeoutError,OSError) as error:raise ValueError('AI 文案服务连接失败或超时（'+_network_reason(error,120 if images else 60)+'）；未采用未完成内容。请检查运行本软件那台电脑的网络或代理后重试') from None
     try:
         answer=json.loads(raw)['choices'][0]['message']['content'];answer=re.sub(r'^```(?:json)?\s*|\s*```$','',answer.strip());result=json.loads(answer)
         if not isinstance(result,dict):raise ValueError()
