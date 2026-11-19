@@ -732,3 +732,5 @@ a.kpi:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:var
 .negative{color:#a12a1f}@media (prefers-color-scheme:dark){.negative{color:#ff9b8f}}
 .issue-line{margin:0 0 6px}.issue-line b{font-weight:600}
 #insights-panel td b,#insights-panel td.negative,#insights-panel td:not(:has(small)){white-space:nowrap}#insights-panel .issue-line b{white-space:normal}#insights-panel .inline-check{display:flex;align-items:center;gap:8px;align-self:center}
+
+.inventory-gen-bar{margin:14px 0 4px;padding:12px 15px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}.inventory-gen-bar .hint{margin:0 0 8px}.inv-gen-actions{display:flex;flex-wrap:wrap;gap:8px}.inv-gen-actions .button{font-size:12px;padding:8px 12px}.inv-gen{margin-top:6px}.inv-gen-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.inv-gen-row select{max-width:100%;min-width:0;flex:1 1 240px;font-size:12px}.inv-gen-status{margin:4px 0 0;font-size:11px;color:var(--muted)}.inv-gen-status.ok{color:var(--ink-2)}.inv-gen-status.bad{color:var(--warn)}

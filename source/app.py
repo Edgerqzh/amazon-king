@@ -179,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
                           '/oauth.js': ('oauth.js', 'text/javascript; charset=utf-8'),
                           '/watch.js': ('watch.js', 'text/javascript; charset=utf-8'),
                           '/insights.js': ('insights.js', 'text/javascript; charset=utf-8'),
+                          '/inventory-generate.js': ('inventory-generate.js', 'text/javascript; charset=utf-8'),
                           '/style.css': ('style.css', 'text/css; charset=utf-8')}
                 if path.path in assets:
                     name, mime = assets[path.path]

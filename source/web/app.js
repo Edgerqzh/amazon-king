@@ -387,8 +387,8 @@ function categoryResults(report){
   const groups=new Map();
   for(const item of report.items){
     const category=item.category_key||item.suggested_category||'无法识别类目';
-    if(!groups.has(category))groups.set(category,{category,rows:[],statuses:new Set(),candidates:new Map()});
-    const group=groups.get(category);group.rows.push(item.row);group.statuses.add(item.status);
+    if(!groups.has(category))groups.set(category,{category,rows:[],titles:[],statuses:new Set(),candidates:new Map()});
+    const group=groups.get(category);group.rows.push(item.row);if(item.title&&group.titles.length<3)group.titles.push(item.title);group.statuses.add(item.status);
     if(item.template)group.candidates.set(item.template.id,item.template);
   }
   return [...groups.values()].map(group=>{
@@ -405,6 +405,7 @@ function renderInventory(report) {
   updateInventoryDownload(groups);
   $('inventory-summary').textContent='识别到 '+groups.filter(g=>g.category!=='无法识别类目').length+' 类商品 · '+inventoryDownloadIds().length+' 份不同表格';
   $('inventory-context').textContent='库存：'+report.filename+' · '+TABLE_TYPES[report.table_type||'upload']+' · 目标店铺：'+report.shop+' · 地区：'+report.marketplace+'。每类一行；相同文件只下载一次。';
+  if(typeof invGenBar==='function')invGenBar(groups,report);
   $('inventory-warnings').replaceChildren(...report.warnings.map(w=>{const p=document.createElement('p');p.textContent=w;return p;}));
   $('inventory-groups').replaceChildren(...groups.map(group=>{
     const box=document.createElement('article');box.className='analysis-group category-template '+group.status;
@@ -421,6 +422,7 @@ function renderInventory(report) {
       const detail=document.createElement('p');detail.className='hint';detail.textContent=group.status==='review'?'当前店铺未匹配到模板，请确认类别或启用 AI 图文识别。':'当前店铺和地区暂无对应模板。';body.append(detail);
       if(group.status==='missing'&&currentRole!=='viewer'){const link=document.createElement('a');link.href='#import';link.className='text-button';link.textContent='补充模板';actions.append(link);}
       else {const label=document.createElement('span');label.className='hint';label.textContent='暂无文件';actions.append(label);}
+      if(typeof invGenAttach==='function')invGenAttach(body,group,report);
     }
     if(group.status==='review'&&group.category!=='无法识别类目'&&!group.category.includes(' / ')){
       const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='确认或修正类别';

@@ -39,6 +39,17 @@ class Auth:
         with self.db() as db:
             db.execute('INSERT INTO users VALUES (?,?,?,?)', (username, salt, hashed, role))
 
+    def set_password(self, username, password):
+        """Give an existing account a new password and sign it out everywhere."""
+        if len(password) < 12 or len(password) > 256:
+            raise ValueError('密码须为 12–256 字符')
+        salt = secrets.token_hex(16)
+        hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), 600000).hex()
+        with self.db() as db:
+            if db.execute('UPDATE users SET salt=?, hash=? WHERE username=?', (salt, hashed, username)).rowcount != 1:
+                raise ValueError('没有这个账号：' + username)
+            db.execute('DELETE FROM sessions WHERE username=?', (username,))
+
     def login(self, username, password, ip):
         now = time.time()
         # Logins run in parallel: count this attempt up front (under a lock) so concurrent
