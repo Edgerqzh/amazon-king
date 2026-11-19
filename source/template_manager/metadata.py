@@ -104,7 +104,7 @@ def inspect(data, include_seller=False):
             encoded = ''.join(chunks).encode('utf-8')
             if not re.fullmatch(r'[0-9a-f]{64}', raw.get('manifestSha256', '')) or hashlib.sha256(encoded).hexdigest() != raw['manifestSha256']:
                 raise ValueError('生成模板规则清单哈希不符')
-            manifest = schema_utils.strict_json(encoded, limit=24 * 1024 * 1024)
+            manifest = schema_utils.strict_json(encoded, limit=24 * 1024 * 1024, max_nodes=schema_utils.SCHEMA_MAX_NODES, max_depth=schema_utils.SCHEMA_MAX_DEPTH)
             if not isinstance(manifest, dict) or manifest.get('format') != schema_utils.GENERATED_FORMAT or manifest.get('marketplace') != result['marketplace'] or result['product_types'] != [manifest.get('product_type')]:
                 raise ValueError('生成模板规则清单与模板来源不一致')
             if manifest.get('schema_sha256') != raw.get('schemaSha256') or not re.fullmatch(r'[0-9a-f]{64}', raw.get('schemaSha256', '')):

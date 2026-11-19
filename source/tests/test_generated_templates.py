@@ -227,6 +227,20 @@ class GenerationTests(unittest.TestCase):
         self.client.seller = 'ATEST002';token4 = self.generate()['token']
         with self.assertRaises(ValueError):self.service.save(USER, {'token': token4, 'shop': 'Shop A'})
 
+    def test_amazon_sized_schema_with_nested_conditions_generates_saves_and_reads_back(self):
+        # Real Amazon schemas: hundreds of attributes (far over the 50,000-node limit for typed JSON),
+        # selectors and conditions nested inside allOf branches.
+        import amazon_schema_shape
+        self.client.schema = amazon_schema_shape.schema(market=MARKET)
+        preview = self.generate()
+        self.assertGreater(preview['field_count'], 400)
+        # The open-enum $defs (marketplace_id / language_tag) must not push attributes into advanced JSON.
+        self.assertEqual(preview['json_count'], 0)
+        saved = self.service.save(USER, {'token': preview['token'], 'shop': 'Shop A', 'category': '护肤'})
+        self.assertEqual(saved['category'], '护肤')
+        data = library.verified(self.root, saved)
+        self.assertEqual(metadata.inspect(data)['product_types'], ['SUITCASE'])
+
     def test_generate_save_fill_typed_json_preview_single_confirmed_submit_chain(self):
         preview = self.generate();saved = self.service.save(USER, {'token': preview['token'], 'shop': 'Shop A'})
         template = library.verified(self.root, saved)

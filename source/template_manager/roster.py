@@ -63,10 +63,10 @@ def parse(text):
         rows = [r for r in rows if not all(re.fullmatch(r'[-:\s]+', c) for c in r)]
     else:
         try:
-            dialect = csv.Sniffer().sniff(text[:5000], delimiters='\t,;')
+            delimiter = csv.Sniffer().sniff(text[:5000], delimiters='\t,;').delimiter  # keep Excel quoting rules
         except csv.Error:
-            dialect = csv.excel_tab
-        rows = [[clean(v) for v in row] for row in csv.reader(io.StringIO(text), dialect) if any(v.strip() for v in row)]
+            delimiter = '\t'
+        rows = [[clean(v) for v in row] for row in csv.reader(io.StringIO(text), delimiter=delimiter) if any(v.strip() for v in row)]
         if not rows or len(rows[0])!=3 or any(len(r)!=len(rows[0]) for r in rows[1:]):
             if not any(c in lines[0] for c in ',;|'):
                 rows=wrapped_rows(lines)

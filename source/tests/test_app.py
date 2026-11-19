@@ -265,5 +265,52 @@ class SharedLibraryTest(unittest.TestCase):
         self.assertEqual(self.req('GET','/api/shops/roster',cookie=owner)[1],before)
 
 
+class RestoreAndFileNameTest(unittest.TestCase):
+    """Own server: restores need a library without templates."""
+    setUpClass = classmethod(SharedLibraryTest.setUpClass.__func__)
+    tearDownClass = classmethod(SharedLibraryTest.tearDownClass.__func__)
+    req, login = SharedLibraryTest.req, SharedLibraryTest.login
+
+    def test_unsafe_upload_names_are_refused(self):
+        owner = self.login('owner')
+        for name in ('D:escape.xlsx', 'CON.xlsx', 'lpt1', 'report.xlsx.', 'a|b.xlsx', '..'):
+            payload = {'filename': name, 'data': base64.b64encode(b'x').decode(), 'marketplace': 'AE', 'category': '家居', 'version': 'v1'}
+            status, body, _ = self.req('POST', '/api/upload', payload, owner)
+            self.assertEqual(status, 400, name)
+            self.assertIn('文件名无效', json.loads(body)['error'])
+
+    def test_restore_keeps_current_roster_naming_rules_and_old_library(self):
+        from template_manager import roster
+        from test_inventory import make_book
+        owner = self.login('owner')
+        root = Path(self.tmp.name) / 'library'
+        db = library.connect(root)  # roster and naming rules set up before any template exists
+        roster.apply(db, [{'shop': '当前店', 'marketplace': 'AE', 'fingerprint': roster.fingerprint('ACURRENT01'), 'account_hint': 'CURR', 'seller_id': 'ACURRENT01'}])
+        db.execute('INSERT INTO product_aliases VALUES (?,?,?,?,?)', ('小方巾布', '小方巾布', '洗脸巾', 'owner', '2026-11-19T00:00:00+00:00'))
+        db.commit(); db.close()
+        other = Path(self.tmp.name) / 'older'  # an older backup made elsewhere, without that roster
+        book = Path(self.tmp.name) / 'old.xlsx'
+        book.write_bytes(make_book({'Template': [['sku', 'title']]}))
+        library.run(SimpleNamespace(command='add', library=str(other), source=str(book), marketplace='AE', category='家居', version='v1', shop=library.GLOBAL_SHOP, table_type='upload'))
+        db = library.connect(other)
+        db.execute('INSERT INTO product_aliases VALUES (?,?,?,?,?)', ('小方巾布', '小方巾布', '擦手巾', 'old', '2026-01-01T00:00:00+00:00'))
+        db.execute('INSERT INTO product_aliases VALUES (?,?,?,?,?)', ('随手杯子', '随手杯子', '保温杯', 'old', '2026-01-01T00:00:00+00:00'))
+        db.commit(); db.close()
+        backup = Path(self.tmp.name) / 'older.zip'
+        library.run(SimpleNamespace(command='backup', library=str(other), output=str(backup)))
+        status, body, _ = self.req('POST', '/api/restore', {'filename': 'older.zip', 'data': base64.b64encode(backup.read_bytes()).decode()}, owner)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)['count'], 1)
+        db = library.connect(root)
+        try:
+            self.assertEqual([tuple(r) for r in db.execute('SELECT shop,marketplace FROM shop_registry')], [('当前店', 'AE')])
+            self.assertEqual(dict(db.execute('SELECT alias_key,category FROM product_aliases').fetchall()), {'小方巾布': '洗脸巾', '随手杯子': '保温杯'})
+        finally:
+            db.close()
+        kept = list(root.parent.glob('library-before-restore-*'))
+        self.assertEqual(len(kept), 1)
+        self.assertTrue((kept[0] / 'index.sqlite3').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

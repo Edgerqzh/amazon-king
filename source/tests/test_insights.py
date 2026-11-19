@@ -150,7 +150,10 @@ class ReviewTests(unittest.TestCase):
                                            {'AmazonOrderId': '111-0000002-0000002', 'PurchaseDate': '2026-10-25T00:00:00Z'}]}}
         if method == 'GET':
             eligible = path.endswith('0000001')
-            return {'_links': {'actions': [{'href': path + '/solicitations/productReviewAndSellerFeedback', 'name': 'productReviewAndSellerFeedback'}] if eligible else []}}
+            # Amazon's real link carries the marketplace as a query string (solicitations model example).
+            href = path + '/solicitations/productReviewAndSellerFeedback?marketplaceIds=' + query['marketplaceIds']
+            return {'_links': {'actions': [{'href': href, 'name': 'productReviewAndSellerFeedback'}] if eligible else [],
+                               'self': {'href': path + '?marketplaceIds=' + query['marketplaceIds']}}}
         return {}
 
     def test_candidates_window_and_no_buyer_details(self):
@@ -173,7 +176,36 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(posts, [('POST', '/solicitations/v1/orders/111-0000001-0000001/solicitations/productReviewAndSellerFeedback', {'marketplaceIds': 'A2VIGQ35RCS4UG'}, None, True)])
         again = insights.Reviews(self.log, sleep=lambda s: None, now=lambda: NOW)  # remembered after a restart
         self.assertEqual(again.send(Fake(self.answer), 'amy', 'AE', ['111-0000001-0000001'], True)['items'][0]['result'], 'skipped')
-        self.assertEqual({o['id']: o['done'] for o in again.candidates(Fake(self.answer), 'AE')['orders']}, {'111-0000001-0000001': 'sent', '111-0000002-0000002': 'not_eligible'})
+        orders = {o['id']: o for o in again.candidates(Fake(self.answer), 'AE')['orders']}
+        # Only "sent" is final; "not eligible" is shown but can be checked again once the order is delivered.
+        self.assertEqual(orders['111-0000001-0000001']['done'], 'sent')
+        self.assertEqual(orders['111-0000002-0000002']['done'], '')
+        self.assertEqual(orders['111-0000002-0000002']['last_not_eligible'], NOW.isoformat(timespec='seconds'))
+        client = Fake(self.answer)
+        self.assertEqual(again.send(client, 'amy', 'AE', ['111-0000002-0000002'], True)['items'][0]['result'], 'not_eligible')
+        self.assertEqual([c[0] for c in client.calls], ['GET'])
+
+    def test_link_matching_uses_the_action_not_the_raw_href(self):
+        name_only = {'_links': {'actions': [{'href': '/x?y=1', 'name': 'productReviewAndSellerFeedback'}]}}
+        href_only = {'_links': {'actions': [{'href': '/solicitations/v1/orders/1/solicitations/productReviewAndSellerFeedback?marketplaceIds=A'}]}}
+        other = {'_links': {'actions': [{'href': '/solicitations/v1/orders/1/solicitations/somethingElse?marketplaceIds=A', 'name': 'somethingElse'}]}}
+        self.assertTrue(insights.review_allowed(name_only));self.assertTrue(insights.review_allowed(href_only))
+        self.assertFalse(insights.review_allowed(other));self.assertFalse(insights.review_allowed({}));self.assertFalse(insights.review_allowed(None))
+
+    def test_old_not_eligible_records_no_longer_block_orders(self):
+        # Logs written before this fix marked every order "not_eligible" because of the query string.
+        self.log.write_text(json.dumps({'order': '111-0000001-0000001', 'result': 'not_eligible', 'at': '2026-11-10T00:00:00+00:00'}) + '\n' + 'not json\n', encoding='utf-8')
+        reviews = insights.Reviews(self.log, sleep=lambda s: None, now=lambda: NOW)
+        client = Fake(self.answer)
+        self.assertEqual(reviews.send(client, 'amy', 'AE', ['111-0000001-0000001'], True)['items'][0]['result'], 'sent')
+
+    def test_an_order_already_being_sent_elsewhere_is_skipped(self):
+        self.reviews.in_flight.add('111-0000001-0000001')
+        client = Fake(self.answer)
+        result = self.reviews.send(client, 'amy', 'AE', ['111-0000001-0000001', '111-0000002-0000002'], True)
+        self.assertEqual([r['result'] for r in result['items']], ['skipped', 'not_eligible'])
+        self.assertFalse(any(c[0] == 'POST' for c in client.calls))
+        self.assertEqual(self.reviews.in_flight, {'111-0000001-0000001'})  # only this call's own reservations are released
 
     def test_missing_permission_stops_the_batch(self):
         client = Fake(lambda m, p, q: spapi.SpApiError('Unauthorized', 403))

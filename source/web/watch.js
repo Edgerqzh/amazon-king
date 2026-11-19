@@ -3,13 +3,17 @@
   const id=name=>document.getElementById(name);
   const STATE={ours:['购物车在我们这','state-ok'],shared:['有跟卖','state-warn'],lost:['购物车被抢','state-bad'],no_buy_box:['无购物车','state-warn'],not_selling:['我们没在卖','state-dim'],error:['读取失败','state-dim']};
   const RESTOCK_CLASS={out:'state-bad',urgent:'state-bad',soon:'state-warn',ok:'state-ok',slow:'state-dim',idle:'state-dim'};
-  let watchResult=null,restockResult=null,restockRun=0;
+  // view goes up on every store or site change; replies that come back after that are dropped.
+  let watchResult=null,restockResult=null,restockRun=0,view=0;
+  const current=()=>{const at=view;return ()=>at===view;};
   const tag=(text,cls)=>el('span',cls,text);
   const money=o=>o?o.price+' '+o.currency:'—';
 
   // --- offers watch ---
   id('watch-from-fba').addEventListener('click',()=>withButton(id('watch-from-fba'),'正在读取…',async()=>{
-    const stock=await postJSON('/api/amazon/fba-inventory',{marketplace:id('watch-market').value});
+    const fresh=current();let stock;
+    try{stock=await postJSON('/api/amazon/fba-inventory',{marketplace:id('watch-market').value});}catch(e){if(!fresh())return;throw e;}
+    if(!fresh())return;
     // Out-of-stock items are kept: that is when another seller most easily takes the Buy Box.
     const ranked=stock.items.filter(i=>i.asin).sort((a,b)=>(b.fulfillable||0)-(a.fulfillable||0));
     const asins=[...new Set(ranked.map(i=>i.asin))];
@@ -20,9 +24,11 @@
     const asins=id('watch-asins').value.split(/[\s,;，；]+/).map(s=>s.trim()).filter(Boolean);
     if(!asins.length){notify('请先填写要检查的 ASIN',true);return;}
     id('watch-status').textContent='正在读取 '+asins.length+' 个 ASIN 的报价，大约需要 '+Math.ceil(asins.length*2.2)+' 秒…';
-    try{watchResult=await postJSON('/api/amazon/offers-watch',{marketplace:id('watch-market').value,asins});}
-    catch(e){id('watch-status').textContent=e.message;throw e;}
-    renderWatch();
+    const fresh=current();let data;
+    try{data=await postJSON('/api/amazon/offers-watch',{marketplace:id('watch-market').value,asins});}
+    catch(e){if(!fresh())return;id('watch-status').textContent=e.message;throw e;}
+    if(!fresh())return;
+    watchResult=data;renderWatch();
   }));
   function renderWatch(){
     const data=watchResult;id('watch-result').hidden=!data;id('watch-export').hidden=!data;if(!data)return;
@@ -54,11 +60,15 @@
   id('restock-run').addEventListener('click',()=>withButton(id('restock-run'),'正在生成…',async()=>{
     const run=++restockRun,market=id('restock-market').value,days=int('restock-days'),lead=int('restock-lead'),cover=int('restock-cover');
     id('restock-status').textContent='正在请亚马逊生成最近 '+days+' 天的订单报告…';
-    const started=await postJSON('/api/amazon/restock/start',{marketplace:market,days});
+    const store=currentStore;let started;
+    try{started=await postJSON('/api/amazon/restock/start',{marketplace:market,days,store});}catch(e){if(run!==restockRun)return;throw e;}
+    if(run!==restockRun)return;
     for(let attempt=0;attempt<60;attempt++){
       await new Promise(r=>setTimeout(r,attempt?10000:5000));
       if(run!==restockRun)return;
-      const result=await postJSON('/api/amazon/restock',{marketplace:market,id:started.id,lead_days:lead,cover_days:cover});
+      let result;
+      try{result=await postJSON('/api/amazon/restock',{marketplace:market,store,id:started.id,lead_days:lead,cover_days:cover});}catch(e){if(run!==restockRun)return;throw e;}
+      if(run!==restockRun)return;
       if(result.status==='DONE'){restockResult=result;renderRestock();return;}
       if(result.status==='CANCELLED'||result.status==='FATAL'){id('restock-status').textContent=result.note||'亚马逊没有生成订单报告';return;}
       id('restock-status').textContent='亚马逊正在生成订单报告（'+(result.status==='IN_PROGRESS'?'处理中':'排队中')+'），已等 '+Math.round((5+attempt*10)/60*10)/10+' 分钟…';
@@ -80,5 +90,5 @@
     id('restock-status').textContent=data.marketplace+' 站点：按最近 '+data.days+' 天销量、到货 '+data.lead_days+' 天、覆盖 '+data.cover_days+' 天计算。建议数量 = 日均销量 ×（到货天数 + 覆盖天数）− 可售 − 入库途中。只统计亚马逊配送的订单。'+(data.stock_truncated?'物流库存 SKU 太多，只读到一部分。':'');
   }
   id('restock-export').addEventListener('click',()=>{if(!restockResult)return;saveCsv([['SKU','ASIN','商品','情况','统计期销量','近7天销量','日均销量','可售','入库途中','预留','可售天数','含在途可售天数','建议补货'],...restockResult.items.map(i=>[i.sku,i.asin,i.title,i.state_label,i.sold,i.sold_7,i.daily,i.fulfillable,i.inbound,i.reserved,i.days_left??'',i.days_left_with_inbound??'',i.suggest])],'补货建议_'+restockResult.marketplace+'.csv');});
-  window.resetWatch=()=>{watchResult=null;restockResult=null;restockRun++;renderWatch();renderRestock();for(const n of ['watch-status','restock-status'])id(n).textContent='';};
+  window.resetWatch=()=>{view++;watchResult=null;restockResult=null;restockRun++;renderWatch();renderRestock();for(const n of ['watch-status','restock-status'])id(n).textContent='';};
 })();

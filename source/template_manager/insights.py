@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import threading
 import time
+import urllib.parse
 
 from . import listings, operations, spapi
 
@@ -342,6 +343,24 @@ def review_path(order_id):
     return '/solicitations/v1/orders/' + order_id + '/solicitations/' + REVIEW_ACTION
 
 
+def review_allowed(actions):
+    """True when Amazon lists the review-request action for this order.
+
+    Amazon's link carries a query string (".../productReviewAndSellerFeedback?marketplaceIds=..."),
+    so compare the action name, or the path without the query.
+    """
+    links = ((actions.get('_links') or {}).get('actions') or []) if isinstance(actions, dict) else []
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        if link.get('name') == REVIEW_ACTION:
+            return True
+        path = urllib.parse.urlsplit(str(link.get('href', ''))).path
+        if path.rstrip('/').endswith('/' + REVIEW_ACTION):
+            return True
+    return False
+
+
 class Reviews:
     """Orders that can still be asked for a review, and sending Amazon's standard request."""
 
@@ -349,25 +368,38 @@ class Reviews:
         self.path = Path(log_path) if log_path else None
         self.sleep, self.now = sleep, now or (lambda: datetime.datetime.now(UTC))
         self.lock = threading.Lock()
-        self.sent = self._load()
+        # Only a sent request is final. "Not eligible" depends on time (5–30 days after delivery),
+        # so it is remembered for display but the order can be checked again later.
+        self.sent, self.checked = self._load()
+        self.in_flight = set()
 
     def _load(self):
-        sent = {}
+        sent, checked = {}, {}
         if self.path is None or not self.path.is_file():
-            return sent
+            return sent, checked
         try:
-            for line in self.path.read_text(encoding='utf-8').splitlines():
-                record = json.loads(line)
-                if isinstance(record, dict) and record.get('result') in ('sent', 'not_eligible'):
-                    sent[record.get('order', '')] = record['result']
+            lines = self.path.read_text(encoding='utf-8').splitlines()
         except (OSError, ValueError):
-            pass
-        return sent
+            return sent, checked
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if record.get('result') == 'sent':
+                sent[record.get('order', '')] = 'sent'
+            elif record.get('result') == 'not_eligible':
+                checked[record.get('order', '')] = str(record.get('at', ''))
+        return sent, checked
 
     def _log(self, record):
         with self.lock:
-            if record['result'] in ('sent', 'not_eligible'):
-                self.sent[record['order']] = record['result']
+            if record['result'] == 'sent':
+                self.sent[record['order']] = 'sent'
+            elif record['result'] == 'not_eligible':
+                self.checked[record['order']] = record.get('at', '')
             if self.path is not None:
                 with self.path.open('a', encoding='utf-8') as stream:
                     stream.write(json.dumps(record, ensure_ascii=False) + '\n')
@@ -388,7 +420,8 @@ class Reviews:
                 if not ORDER_ID.fullmatch(order_id):
                     continue
                 rows.append({'id': order_id, 'purchased': order.get('PurchaseDate', ''), 'channel': order.get('FulfillmentChannel', ''),
-                             'total': operations.money(order.get('OrderTotal')), 'done': self.sent.get(order_id, '')})
+                             'total': operations.money(order.get('OrderTotal')), 'done': self.sent.get(order_id, ''),
+                             'last_not_eligible': '' if order_id in self.sent else self.checked.get(order_id, '')})
             token = payload.get('NextToken')
             if not token:
                 break
@@ -404,27 +437,36 @@ class Reviews:
             raise ValueError('每次发送 1–%d 个订单' % MAX_REVIEW_BATCH)
         if not all(isinstance(o, str) and ORDER_ID.fullmatch(o) for o in order_ids):
             raise ValueError('订单编号格式无效')
-        results = []
-        for index, order_id in enumerate(order_ids):
-            if self.sent.get(order_id):
-                results.append({'id': order_id, 'result': 'skipped', 'note': '之前已经处理过'})
-                continue
-            if index:
-                self.sleep(1.1)  # both solicitation operations allow about one request per second
-            try:
-                actions = client.call('GET', '/solicitations/v1/orders/' + order_id, {'marketplaceIds': market})
-                links = ((actions.get('_links') or {}).get('actions') or []) if isinstance(actions, dict) else []
-                if not any(isinstance(link, dict) and str(link.get('href', '')).endswith('/' + REVIEW_ACTION) for link in links):
-                    record = {'id': order_id, 'result': 'not_eligible', 'note': '亚马逊表示这个订单目前不能请求评论（未送达、超过 30 天或已请求过）'}
-                else:
-                    self.sleep(1.1)
-                    client.call('POST', review_path(order_id), {'marketplaceIds': market}, None, live=True)
-                    record = {'id': order_id, 'result': 'sent', 'note': '已发送'}
-            except spapi.SpApiError as e:
-                if e.status in (None, 401, 403, 429):
-                    raise  # missing permission or throttling: stop the batch, nothing more is sent
-                record = {'id': order_id, 'result': 'failed', 'note': str(e)[:300]}
-            results.append(record)
-            self._log({'order': order_id, 'result': record['result'], 'user': user, 'store': getattr(client, 'store_id', spapi.DEFAULT_STORE),
-                       'marketplace': marketplace, 'at': self.now().isoformat(timespec='seconds')})
+        # Reserve the orders first, so a second send running at the same time (another tab, a double click) skips them.
+        with self.lock:
+            reserved = [o for o in order_ids if not self.sent.get(o) and o not in self.in_flight]
+            self.in_flight.update(reserved)
+        results, first = [], True
+        try:
+            for order_id in order_ids:
+                if order_id not in reserved:
+                    note = '之前已经发送过' if self.sent.get(order_id) else '正在由另一次发送处理'
+                    results.append({'id': order_id, 'result': 'skipped', 'note': note})
+                    continue
+                if not first:
+                    self.sleep(1.1)  # both solicitation operations allow about one request per second
+                first = False
+                try:
+                    actions = client.call('GET', '/solicitations/v1/orders/' + order_id, {'marketplaceIds': market})
+                    if not review_allowed(actions):
+                        record = {'id': order_id, 'result': 'not_eligible', 'note': '亚马逊表示这个订单目前不能请求评论（未送达、超过 30 天或已请求过），过几天可以再试'}
+                    else:
+                        self.sleep(1.1)
+                        client.call('POST', review_path(order_id), {'marketplaceIds': market}, None, live=True)
+                        record = {'id': order_id, 'result': 'sent', 'note': '已发送'}
+                except spapi.SpApiError as e:
+                    if e.status in (None, 401, 403, 429):
+                        raise  # missing permission or throttling: stop the batch, nothing more is sent
+                    record = {'id': order_id, 'result': 'failed', 'note': str(e)[:300]}
+                results.append(record)
+                self._log({'order': order_id, 'result': record['result'], 'user': user, 'store': getattr(client, 'store_id', spapi.DEFAULT_STORE),
+                           'marketplace': marketplace, 'at': self.now().isoformat(timespec='seconds')})
+        finally:
+            with self.lock:
+                self.in_flight.difference_update(reserved)
         return {'items': results, 'sent': sum(1 for r in results if r['result'] == 'sent')}

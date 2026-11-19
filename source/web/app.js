@@ -180,7 +180,7 @@ async function request(url, options={}) {
   const res=await fetch(url,options);
   const data=await res.json();
   if(res.status===401) { $('workspace').hidden=true; $('login-screen').hidden=false; }
-  if(!res.ok) throw new Error(data.error || '操作失败');
+  if(!res.ok){const error=new Error(data.error || '操作失败');error.status=res.status;throw error;}
   return data;
 }
 function cell(row,text,cls) {
@@ -259,6 +259,7 @@ $('restore').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;
   if(busy){notify('请等待当前操作完成',true);event.target.value='';return;}
   if(templates.length){notify('恢复仅支持空模板库，现有模板不会被覆盖。',true);event.target.value='';return;}
+  if(!confirm('将用备份替换当前模板库。当前的店铺名单和叫法归类规则会合并保留；替换前的模板库会另存一份，不会删除。确定恢复？')){event.target.value='';return;}
   busy=true;
   try{const result=await sendFile('/api/restore',file);await load();notify('恢复成功，共 '+result.count+' 份模板。');}catch(e){notify(e.message,true);}finally{busy=false;event.target.value='';}
 });
@@ -276,6 +277,12 @@ async function enter() {
   await load();await loadAliases();
 }
 let currentStore='';try{currentStore=localStorage.getItem('store')||'';}catch(e){/* storage may be unavailable */}
+// Goes up whenever another store is chosen. A reply that arrives afterwards belongs to the old store and is dropped.
+let storeEpoch=0;
+// Call before awaiting a store read; the returned check is true only while the same store (and, if a site
+// select is given, the same site) is still chosen.
+function freshness(marketSelect){const epoch=storeEpoch,market=marketSelect?$(marketSelect).value:'';return ()=>epoch===storeEpoch&&(!marketSelect||$(marketSelect).value===market);}
+const STALE_NOTE='店铺或站点已切换，这次读取的结果已作废，请重新操作。';
 function withStore(url,body){return (url.startsWith('/api/amazon/')||url.startsWith('/api/generated-templates/')||url.startsWith('/api/lookalike/'))&&body&&typeof body==='object'&&!('store' in body)?{...body,store:currentStore}:body;}
 async function postJSON(url,body) {body=withStore(url,body);return request(url,{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify(body)});}
 $('login-form').addEventListener('submit',async e=>{
@@ -428,7 +435,12 @@ function renderInventory(report) {
       const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='确认或修正类别';
       const input=document.createElement('input');input.className='confirm-category';input.value=group.category;input.maxLength=120;input.setAttribute('aria-label','确认类别 '+group.category);
       const button=document.createElement('button');button.className='text-button';button.type='button';button.textContent='确认类别并重新匹配';
-      button.addEventListener('click',()=>{if(busy)return;const category=input.value.trim();if(!category){notify('请输入确认后的类别',true);return;}for(const row of group.rows){inventoryOverrides[String(row)]=category;delete inventoryTemplateOverrides[String(row)];if(group.template?.matched_product_type&&declaredProductTypes(group.template).includes(group.template.matched_product_type))inventoryTemplateOverrides[String(row)]={template_id:group.template.id,product_type:group.template.matched_product_type};}inventoryLocalRecheck=true;$('inventory-form').requestSubmit($('inventory-form').querySelector('button[type="submit"]'));});
+      button.addEventListener('click',()=>{if(busy)return;const category=input.value.trim();if(!category){notify('请输入确认后的类别',true);return;}
+        // Only a plain confirmation keeps the candidate template; a corrected category is matched again by the server.
+        // Same comparison as the server's category key (product_types.norm): NFKC, case-folded, letters and digits only.
+        const key=value=>String(value).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
+        const pin=key(category)===key(group.category)&&group.template?.matched_product_type&&declaredProductTypes(group.template).includes(group.template.matched_product_type);
+        for(const row of group.rows){inventoryOverrides[String(row)]=category;delete inventoryTemplateOverrides[String(row)];if(pin)inventoryTemplateOverrides[String(row)]={template_id:group.template.id,product_type:group.template.matched_product_type};}inventoryLocalRecheck=true;$('inventory-form').requestSubmit($('inventory-form').querySelector('button[type="submit"]'));});
       details.append(summary,input,button);body.append(details);
     }
     box.append(checkbox,body,actions);return box;
@@ -1335,40 +1347,70 @@ $('logout').addEventListener('click',()=>{reportData=null;reportFile=null;report
 
 // Amazon SP-API: read-only SKU lookup, and a validation-only pre-check of the fill draft.
 // Credentials never reach the browser; the server only reports whether they are configured.
-let amazonStatus=null,amazonResult=null,amazonBusy=false,precheckSequence=0,credAdding=false;
+let amazonStatus=null,amazonResult=null,amazonBusy=false,precheckSequence=0,credAdding=false,knownStores=[];
 const LISTING_STATUS={BUYABLE:'可售',DISCOVERABLE:'可搜索到'};
+// Only a store the server says no longer exists falls back to the first store. Any other failure
+// (network, server restart, expired login) keeps the chosen store and says so.
+const storeRemoved=error=>error?.status===400&&/店铺不存在/.test(error.message||'');
+// Resolves false when a newer store choice made this answer irrelevant.
 async function loadAmazonStatus(){
-  try{amazonStatus=await request('/api/amazon/status?store='+encodeURIComponent(currentStore));}
-  catch(e){
-    // The remembered store may have been removed: fall back to the first store once.
-    amazonStatus=null;
-    if(currentStore){currentStore='';try{localStorage.removeItem('store');}catch(err){/* ignore */}try{amazonStatus=await request('/api/amazon/status');}catch(err){amazonStatus=null;}}
+  const epoch=storeEpoch,store=currentStore;let status=null,failure=null;
+  try{status=await request('/api/amazon/status?store='+encodeURIComponent(store));}catch(e){failure=e;}
+  if(epoch!==storeEpoch)return false;
+  if(failure&&store&&storeRemoved(failure)){
+    chooseStore('');const again=storeEpoch;
+    try{status=await request('/api/amazon/status');failure=null;}catch(e){failure=e;}
+    if(again!==storeEpoch)return false;
+    if(status)notify('之前选择的店铺已不存在，已切换到“'+status.name+'”',true);
   }
-  if(amazonStatus&&amazonStatus.store!==currentStore&&!(currentStore===''&&amazonStatus.store==='default'))currentStore=amazonStatus.store;
+  amazonStatus=status;if(status?.stores)knownStores=status.stores;
+  if(failure&&failure.status!==401)notify('读取亚马逊连接状态失败：'+failure.message+'。仍保持当前选择的店铺，稍后可在“设置”里点“重新读取配置”重试。',true);
   renderAmazonStatus();updatePrecheckActions();renderStoreSelect();
   if(amazonStatus)setGlobalMarket(globalMarket,false);
+  return true;
 }
-function storeList(){return amazonStatus?.stores||[];}
+// The list survives a failed status read, so the selector keeps showing the chosen store.
+function storeList(){return amazonStatus?.stores||knownStores;}
 function storeName(){return amazonStatus?.name||'主店铺';}
 function renderStoreSelect(){
   const stores=storeList(),select=$('global-store'),page=$('workspace').dataset.page;
   $('global-store-wrap').hidden=stores.length<2||!STORE_SELECT_PAGES.includes(page);
   select.replaceChildren(...stores.map(s=>{const option=document.createElement('option');option.value=s.store;option.textContent=s.name+(s.configured?'':'（未配置）');return option;}));
-  select.value=amazonStatus?.store||'default';
+  select.value=amazonStatus?.store||currentStore||'default';
+}
+// Switches the store every request uses and drops whatever was shown for the old one.
+function chooseStore(store){
+  currentStore=!store||store==='default'?'':store;try{if(currentStore)localStorage.setItem('store',currentStore);else localStorage.removeItem('store');}catch(e){/* ignore */}
+  resetStoreData();
+}
+// Everything read for one store is cleared on every page, and replies still on their way are dropped.
+function resetStoreData(){
+  storeEpoch++;amazonStatus=null;
+  amazonResult=null;renderAmazonResult();$('amazon-rows').replaceChildren();$('amazon-lookup-status').textContent='';$('amazon-markets').replaceChildren();
+  opsResult=null;renderOps();$('ops-rows').replaceChildren();
+  fbaResult=null;$('fba-result').hidden=true;$('fba-export').hidden=true;$('fba-rows').replaceChildren();
+  ordersResult=null;renderOrders();$('orders-rows').replaceChildren();$('orders-counts').replaceChildren();
+  $('sales-result').hidden=true;for(const id of ['sales-counts','sales-rows','sales-chart'])$(id).replaceChildren();
+  exportSequence++;clearTimeout(exportTimer);exportId='';$('export-result').hidden=true;$('export-download').hidden=true;$('export-create').disabled=false;$('export-head').replaceChildren();$('export-rows').replaceChildren();
+  $('check-result').hidden=true;$('check-result').replaceChildren();
+  for(const id of ['ops-status','fba-status','orders-status-text','sales-status','export-status','check-status'])$(id).textContent='';
+  // A pre-check report was made with the old store's account; uploaded processing reports stay.
+  if(reportData?.format==='precheck'){reportData=null;reportKind=null;reportLevel='';$('report-result').hidden=true;if(fillReport&&!busy)renderFillMappings();}
+  resetPrecheck();
+  if(typeof window.resetWatch==='function')window.resetWatch();
+  if(typeof window.resetInsights==='function')window.resetInsights();
+  renderHome(null,'');
 }
 async function setStore(store){
-  currentStore=store==='default'?'':store;try{if(currentStore)localStorage.setItem('store',currentStore);else localStorage.removeItem('store');}catch(e){/* ignore */}
-  amazonStatus=null;for(const key of Object.keys(homeCache))delete homeCache[key];
-  ordersResult=null;opsResult=null;fbaResult=null;amazonResult=null;exportId=null;if(typeof window.resetWatch==='function')window.resetWatch();if(typeof window.resetInsights==='function')window.resetInsights();
-  if(typeof resetPrecheck==='function')resetPrecheck();
-  $('amazon-markets').replaceChildren();credAdding=false;
-  await loadAmazonStatus();
+  chooseStore(store);$('amazon-markets').replaceChildren();credAdding=false;const wanted=currentStore;
+  // Stop when a newer choice took over, or when the status could not be read (that failure is already shown).
+  if(!await loadAmazonStatus()||!amazonStatus)return;
   setGlobalMarket(globalMarket,true);
   const page=$('workspace').dataset.page;
-  for(const id of ['orders-status-text','sales-status','export-status','fba-status','ops-status'])if($(id))$(id).textContent='';
   if(page==='orders'||page==='sales')enterPage(page);
   if(page==='generate'&&typeof enterGeneratedTemplates==='function')enterGeneratedTemplates();
-  notify('已切换到店铺“'+storeName()+'”');
+  if(typeof invGenStoreChanged==='function')invGenStoreChanged();
+  if(currentStore===wanted)notify('已切换到店铺“'+storeName()+'”');
 }
 $('global-store').addEventListener('change',()=>setStore($('global-store').value));
 function renderAmazonStatus(){
@@ -1399,14 +1441,15 @@ function showAmazon(){
   $('amazon-from-draft').hidden=!(fillReport?.row_sources?.length);
   const pick=$('check-template'),chosen=pick.value;pick.replaceChildren(...templates.filter(t=>['AE','SA','US'].includes(t.marketplace)).map(t=>new Option([t.shop||'通用模板',t.marketplace,TABLE_TYPES[t.table_type||'upload'],t.category,t.version].join(' · '),t.id)));if(chosen)pick.value=chosen;$('check-run').disabled=!pick.options.length||currentRole==='viewer';$('check-run').hidden=currentRole==='viewer';pick.hidden=currentRole==='viewer';if(currentRole==='viewer')$('check-status').textContent='模板对照由管理员或编辑者操作。';
 }
-$('amazon-refresh').addEventListener('click',async()=>{await loadAmazonStatus();notify(amazonStatus?.configured?'已读取到完整的接口凭证':'接口凭证仍未配置完整',!amazonStatus?.configured);});
+// A failed read already explains itself; only a status that was read gets this summary.
+$('amazon-refresh').addEventListener('click',async()=>{if(await loadAmazonStatus()&&amazonStatus)notify(amazonStatus.configured?'已读取到完整的接口凭证':'接口凭证仍未配置完整',!amazonStatus.configured);});
 $('amazon-test').addEventListener('click',async()=>{
-  if(amazonBusy)return;amazonBusy=true;renderAmazonStatus();$('amazon-test').textContent='正在连接…';
+  if(amazonBusy)return;amazonBusy=true;renderAmazonStatus();$('amazon-test').textContent='正在连接…';const fresh=freshness();
   try{
-    const result=await postJSON('/api/amazon/test',{});
+    const result=await postJSON('/api/amazon/test',{});if(!fresh())return;
     $('amazon-markets').replaceChildren(...result.marketplaces.map(m=>{const tag=document.createElement('span');tag.className='tag'+(m.participating?' amazon-market-on':'');tag.textContent=(m.name||m.id)+(m.country?'（'+m.country+'）':'')+' · '+(m.participating?'在售':'未参与')+(m.suspended?' · 有被停售的商品':'');return tag;}));
     notify(result.marketplaces.length?'连接成功，读到 '+result.marketplaces.length+' 个站点':'连接成功，但没有读到站点');
-  }catch(e){$('amazon-markets').replaceChildren();notify(e.message,true);}
+  }catch(e){if(!fresh())return;$('amazon-markets').replaceChildren();notify(e.message,true);}
   finally{amazonBusy=false;$('amazon-test').textContent='测试连接';renderAmazonStatus();}
 });
 $('amazon-from-draft').addEventListener('click',()=>{
@@ -1432,12 +1475,14 @@ function renderAmazonResult(){
 $('amazon-lookup-form').addEventListener('submit',async event=>{
   event.preventDefault();if(amazonBusy)return;const skus=$('amazon-skus').value.split(/[\r\n,;，；\t]+/).map(s=>s.trim()).filter(Boolean);
   if(!skus.length){notify('请先填写要查询的 SKU',true);return;}
-  amazonBusy=true;renderAmazonStatus();$('amazon-lookup').textContent='正在查询…';$('amazon-lookup-status').textContent='正在向亚马逊查询 '+new Set(skus).size+' 个 SKU，请稍候。';
+  amazonBusy=true;renderAmazonStatus();$('amazon-lookup').textContent='正在查询…';$('amazon-lookup-status').textContent='正在向亚马逊查询 '+new Set(skus).size+' 个 SKU，请稍候。';const fresh=freshness('amazon-market');
   try{
-    amazonResult=await postJSON('/api/amazon/listings',{marketplace:$('amazon-market').value,skus});renderAmazonResult();
+    const result=await postJSON('/api/amazon/listings',{marketplace:$('amazon-market').value,skus});
+    if(!fresh()){$('amazon-lookup-status').textContent=STALE_NOTE;return;}
+    amazonResult=result;renderAmazonResult();
     const found=amazonResult.items.filter(i=>i.found),withIssues=found.filter(i=>i.issues.length).length;
     $('amazon-lookup-status').textContent=amazonResult.marketplace+' 站点：查到 '+found.length+' 个，未找到 '+(amazonResult.items.length-found.length)+' 个，其中 '+withIssues+' 个有亚马逊标出的问题。';
-  }catch(e){$('amazon-lookup-status').textContent=e.message;notify(e.message,true);}
+  }catch(e){if(!fresh()){$('amazon-lookup-status').textContent=STALE_NOTE;return;}$('amazon-lookup-status').textContent=e.message;notify(e.message,true);}
   finally{amazonBusy=false;$('amazon-lookup').textContent='查询状态';renderAmazonStatus();}
 });
 $('amazon-export').addEventListener('click',()=>{
@@ -1469,8 +1514,8 @@ $('fill-precheck-run').addEventListener('click',async()=>{
   const revision=fillRevision,sequence=++precheckSequence,job='precheck-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
   busy=true;const controls=[...$('fill-panel').querySelectorAll('input,select,button')],states=controls.map(c=>c.disabled);controls.forEach(c=>c.disabled=true);
   const progress=$('fill-precheck-progress'),status=$('fill-precheck-status');progress.hidden=false;progress.max=1;progress.value=0;status.dataset.live='1';status.textContent='正在读取资料并发送预检…';
-  let active=true,pollTimer;
-  async function poll(){try{const state=await request('/api/inventory/progress?job_id='+encodeURIComponent(job));if(active&&state.total){progress.max=state.total;progress.value=state.completed||0;status.textContent='亚马逊正在校验 '+(state.completed||0)+' / '+state.total+' 个商品…';}}catch(e){/* the pre-check request itself reports errors */}if(active)pollTimer=setTimeout(poll,1000);}
+  let active=true,pollTimer;const fresh=freshness();
+  async function poll(){try{const state=await request('/api/inventory/progress?job_id='+encodeURIComponent(job));if(active&&sequence===precheckSequence&&state.total){progress.max=state.total;progress.value=state.completed||0;status.textContent='亚马逊正在校验 '+(state.completed||0)+' / '+state.total+' 个商品…';}}catch(e){/* the pre-check request itself reports errors */}if(active)pollTimer=setTimeout(poll,1000);}
   pollTimer=setTimeout(poll,1000);
   try{
     const result=await sendFile('/api/fill/precheck',file,{...fillPayload(),precheck_consent:true,precheck_start:start,precheck_limit:limit,job_id:job,store:currentStore});
@@ -1482,9 +1527,14 @@ $('fill-precheck-run').addEventListener('click',async()=>{
     $('fill-precheck-open').hidden=false;renderFillMappings();fillSubmitItems=result.submittable||[];renderFillSubmit();
     notify(c.error?'亚马逊预检发现 '+c.error+' 条错误，出问题的字段已标红':'亚马逊预检没有发现错误');
   }catch(error){if(revision===fillRevision&&sequence===precheckSequence){fillSubmitItems=[];renderFillSubmit();progress.hidden=true;$('fill-precheck-open').hidden=true;status.textContent=error.message;notify(error.message,true);}}
-  finally{active=false;clearTimeout(pollTimer);busy=false;controls.forEach((c,i)=>{if(c.isConnected)c.disabled=states[i];});const kept=status.textContent;delete status.dataset.live;updateFillActions();status.textContent=kept;}
+  finally{
+    active=false;clearTimeout(pollTimer);busy=false;controls.forEach((c,i)=>{if(c.isConnected)c.disabled=states[i];});
+    // A pre-check overtaken by a store switch or a new draft leaves no "正在校验…" line behind.
+    const current=revision===fillRevision&&sequence===precheckSequence,kept=status.textContent;delete status.dataset.live;updateFillActions();
+    if(current)status.textContent=kept;else if(fillReport&&!fresh())status.textContent='店铺已切换，上一次预检的结果已作废，请重新预检。';
+  }
 });
-$('logout').addEventListener('click',()=>{amazonStatus=null;amazonResult=null;$('amazon-skus').value='';$('amazon-markets').replaceChildren();$('amazon-lookup-status').textContent='';renderAmazonResult();});
+$('logout').addEventListener('click',()=>{storeEpoch++;amazonStatus=null;knownStores=[];amazonResult=null;$('amazon-skus').value='';$('amazon-markets').replaceChildren();$('amazon-lookup-status').textContent='';renderAmazonResult();});
 
 // Store operations. Everything here reads, except the per-SKU "提交" button on the price/stock page.
 const el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!=null)node.textContent=text;return node;};
@@ -1541,7 +1591,10 @@ function renderOps(){
 $('ops-form').addEventListener('submit',event=>{event.preventDefault();withButton($('ops-preview'),'正在读取并预检…',async()=>{
   let items;try{items=parseOpsLines();}catch(e){$('ops-status').textContent=e.message;throw e;}
   $('ops-status').textContent='正在向亚马逊读取 '+items.length+' 个 SKU 的当前值并预检，这一步不修改店铺。';
-  try{opsResult=await postJSON('/api/amazon/change/preview',{marketplace:$('ops-market').value,items});}catch(e){$('ops-status').textContent=e.message;throw e;}
+  const fresh=freshness('ops-market');let result;
+  try{result=await postJSON('/api/amazon/change/preview',{marketplace:$('ops-market').value,items});}catch(e){if(!fresh()){$('ops-status').textContent=STALE_NOTE;return;}$('ops-status').textContent=e.message;throw e;}
+  if(!fresh()){$('ops-status').textContent=STALE_NOTE;return;}
+  opsResult=result;
   const ready=opsResult.items.filter(r=>r.token).length;
   $('ops-status').textContent=opsResult.marketplace+' 站点：'+ready+' 个可以提交，'+(opsResult.items.length-ready)+' 个不能提交。请逐个核对后提交；预检结果 '+opsResult.valid_minutes+' 分钟内有效，过期需重新预检。';renderOps();
 });});
@@ -1556,7 +1609,10 @@ $('ops-log-refresh').addEventListener('click',loadOpsLog);
 let fbaResult=null;
 $('fba-load').addEventListener('click',()=>withButton($('fba-load'),'正在读取…',async()=>{
   $('fba-status').textContent='正在读取亚马逊物流库存…';
-  try{fbaResult=await postJSON('/api/amazon/fba-inventory',{marketplace:$('fba-market').value});}catch(e){$('fba-status').textContent=e.message;throw e;}
+  const fresh=freshness('fba-market');let result;
+  try{result=await postJSON('/api/amazon/fba-inventory',{marketplace:$('fba-market').value});}catch(e){if(!fresh()){$('fba-status').textContent=STALE_NOTE;return;}$('fba-status').textContent=e.message;throw e;}
+  if(!fresh()){$('fba-status').textContent=STALE_NOTE;return;}
+  fbaResult=result;
   $('fba-result').hidden=false;$('fba-export').hidden=!fbaResult.items.length;
   $('fba-rows').replaceChildren(...fbaResult.items.slice(0,500).map(i=>{const tr=el('tr');cell(tr,'').append(el('b','',i.sku),el('small','',i.asin));cell(tr,i.title);for(const v of [i.fulfillable,i.inbound,i.reserved,i.unfulfillable,i.total])cell(tr,String(v??0));return tr;}));
   $('fba-status').textContent=fbaResult.marketplace+' 站点：'+fbaResult.items.length+' 个 SKU，可售合计 '+fbaResult.items.reduce((a,i)=>a+(i.fulfillable||0),0)+' 件。'+(fbaResult.truncated?'数量较多，只读取了前 '+fbaResult.items.length+' 个；完整清单请用“销售与报告”里的物流库存报告。':'');
@@ -1577,7 +1633,9 @@ function renderOrders(){
     const more=cell(tr,''),button=el('button','text-button','查看商品');button.type='button';more.append(button);
     button.addEventListener('click',()=>withButton(button,'读取中…',async()=>{
       if(tr.nextSibling?.classList?.contains('order-items')){tr.nextSibling.remove();return;}
-      const detail=await postJSON('/api/amazon/order-items',{id:order.id}),row=el('tr','order-items'),box=cell(row,'');box.colSpan=8;
+      const fresh=freshness(),detail=await postJSON('/api/amazon/order-items',{id:order.id});
+      if(!fresh()||ordersResult!==data||!tr.isConnected)return;
+      const row=el('tr','order-items'),box=cell(row,'');box.colSpan=8;
       for(const item of detail.items)box.append(el('p','',item.sku+' × '+item.ordered+(item.price.amount?' · '+item.price.amount+' '+item.price.currency:'')+' · '+item.title));
       if(!detail.items.length)box.textContent='亚马逊没有返回商品明细。';tr.after(row);
     }));
@@ -1586,7 +1644,10 @@ function renderOrders(){
 }
 $('orders-form').addEventListener('submit',event=>{event.preventDefault();withButton($('orders-load'),'正在读取…',async()=>{
   $('orders-status-text').textContent='正在读取订单…';
-  try{ordersResult=await postJSON('/api/amazon/orders',{marketplace:$('orders-market').value,days:Number($('orders-days').value),status:$('orders-status').value});}catch(e){$('orders-status-text').textContent=e.message;throw e;}
+  const fresh=freshness('orders-market');let result;
+  try{result=await postJSON('/api/amazon/orders',{marketplace:$('orders-market').value,days:Number($('orders-days').value),status:$('orders-status').value});}catch(e){if(!fresh()){$('orders-status-text').textContent='';reloadIfShowing('orders');return;}$('orders-status-text').textContent=e.message;throw e;}
+  if(!fresh()){$('orders-status-text').textContent='';reloadIfShowing('orders');return;}
+  ordersResult=result;
   $('orders-status-text').textContent=ordersResult.marketplace+' 站点最近 '+ordersResult.days+' 天：'+ordersResult.orders.length+' 个订单。'+(ordersResult.truncated?'订单较多，只读取了最新的 '+ordersResult.orders.length+' 个；完整明细请用“销售与报告”里的订单报告。':'');renderOrders();
 });});
 $('orders-export').addEventListener('click',()=>{if(ordersResult)saveCsv([['订单号','下单时间','状态','配送','金额','币种','已发','未发','最晚发货'],...ordersResult.orders.map(o=>[o.id,o.purchased,ORDER_STATUS[o.status]||o.status,o.channel,o.total.amount,o.total.currency,o.shipped,o.unshipped,o.ship_by])],'订单_'+ordersResult.marketplace+'.csv');});
@@ -1594,7 +1655,9 @@ $('orders-export').addEventListener('click',()=>{if(ordersResult)saveCsv([['订�
 // Sales per day, and reports Amazon prepares on request.
 $('sales-form').addEventListener('submit',event=>{event.preventDefault();withButton($('sales-load'),'正在读取…',async()=>{
   $('sales-status').textContent='正在读取销售数据…';let data;
-  try{data=await postJSON('/api/amazon/sales',{marketplace:$('sales-market').value,days:Number($('sales-days').value)});}catch(e){$('sales-status').textContent=e.message;throw e;}
+  const fresh=freshness('sales-market');
+  try{data=await postJSON('/api/amazon/sales',{marketplace:$('sales-market').value,days:Number($('sales-days').value)});}catch(e){if(!fresh()){$('sales-status').textContent='';reloadIfShowing('sales');return;}$('sales-status').textContent=e.message;throw e;}
+  if(!fresh()){$('sales-status').textContent='';reloadIfShowing('sales');return;}
   $('sales-result').hidden=false;$('sales-status').textContent=data.marketplace+' 站点最近 '+data.days+' 天，按当地日期统计；今天的数字还会变化。';
   countBoxes('sales-counts',[['销售额 '+data.currency,data.sales,''],['订单数',data.orders,''],['件数',data.units,'']]);
   barChart($('sales-chart'),data.rows.map(row=>({label:row.date.slice(5),value:Number(row.sales)||0,tip:row.date+' · '+(row.sales||0)+' '+row.currency+' · '+row.orders+' 单 · '+row.units+' 件'})),data.currency);
@@ -1618,12 +1681,12 @@ async function pollExport(sequence,started){
     $('export-status').textContent='亚马逊正在准备报告（'+(EXPORT_STATES[data.status]||data.status)+'），已等待 '+Math.round((Date.now()-started)/1000)+' 秒。可以先去别的页面，回来仍会显示。';
     if(Date.now()-started>20*60*1000){$('export-status').textContent='等待超过 20 分钟，已停止查询。请稍后重新生成。';$('export-create').disabled=false;return;}
     exportTimer=setTimeout(()=>pollExport(sequence,started),15000);
-  }catch(e){$('export-status').textContent=e.message;$('export-create').disabled=false;}
+  }catch(e){if(sequence!==exportSequence)return;$('export-status').textContent=e.message;$('export-create').disabled=false;}
 }
 $('export-form').addEventListener('submit',async event=>{
   event.preventDefault();if($('export-create').disabled)return;clearTimeout(exportTimer);const sequence=++exportSequence;$('export-create').disabled=true;$('export-result').hidden=true;$('export-download').hidden=true;$('export-status').textContent='正在向亚马逊申请报告…';
-  try{const made=await postJSON('/api/amazon/report/create',{kind:$('export-kind').value,marketplace:$('export-market').value,days:Number($('export-days').value)});exportId=made.id;exportTimer=setTimeout(()=>pollExport(sequence,Date.now()),8000);$('export-status').textContent='已申请“'+made.label+'”，亚马逊正在准备，通常需要 1–5 分钟。';}
-  catch(e){$('export-status').textContent=e.message;$('export-create').disabled=false;notify(e.message,true);}
+  try{const made=await postJSON('/api/amazon/report/create',{kind:$('export-kind').value,marketplace:$('export-market').value,days:Number($('export-days').value)});if(sequence!==exportSequence)return;exportId=made.id;exportTimer=setTimeout(()=>pollExport(sequence,Date.now()),8000);$('export-status').textContent='已申请“'+made.label+'”，亚马逊正在准备，通常需要 1–5 分钟。';}
+  catch(e){if(sequence!==exportSequence)return;$('export-status').textContent=e.message;$('export-create').disabled=false;notify(e.message,true);}
 });
 $('export-download').addEventListener('click',()=>withButton($('export-download'),'正在下载…',async()=>{
   const response=await fetch('/api/amazon/report/download',{method:'POST',headers:{'Content-Type':'application/json','X-Template-Request':'1'},body:JSON.stringify({id:exportId,store:currentStore})});
@@ -1634,7 +1697,9 @@ $('export-download').addEventListener('click',()=>withButton($('export-download'
 // Template columns compared with the definition Amazon serves today.
 $('check-run').addEventListener('click',()=>withButton($('check-run'),'正在对照…',async()=>{
   $('check-status').textContent='正在读取亚马逊当前的字段定义…';let data;
-  try{data=await postJSON('/api/amazon/template-check',{template_id:$('check-template').value});}catch(e){$('check-status').textContent=e.message;throw e;}
+  const fresh=freshness();
+  try{data=await postJSON('/api/amazon/template-check',{template_id:$('check-template').value});}catch(e){if(!fresh()){$('check-status').textContent='';return;}$('check-status').textContent=e.message;throw e;}
+  if(!fresh()){$('check-status').textContent='';return;}
   $('check-status').textContent={match:'没有发现差异：模板包含亚马逊当前列出的必填字段，也没有亚马逊已不使用的列。条件必填的字段不在对照范围内。',review:'发现差异，请看下方明细。差异不一定代表模板不能用，但建议到卖家后台重新下载模板核对。',unknown:'没能取得任何商品类型的字段定义，无法对照。'}[data.status]+(data.generated_at?' 模板生成时间：'+data.generated_at.slice(0,10)+'。':'')+(data.more_types?' 模板声明的商品类型较多，只对照了前 8 个。':'');
   $('check-result').hidden=false;
   $('check-result').replaceChildren(...data.types.map(type=>{
@@ -1787,6 +1852,8 @@ async function enterPage(key){
   if(key==='orders'&&!ordersResult&&!$('orders-load').disabled)$('orders-form').requestSubmit($('orders-load'));
   if(key==='sales'&&$('sales-result').hidden&&!$('sales-load').disabled)$('sales-form').requestSubmit($('sales-load'));
 }
+// A read dropped because the store changed is redone for the new store once its button is free again.
+function reloadIfShowing(page){setTimeout(()=>{if($('workspace').dataset.page===page&&!$('workspace').hidden)enterPage(page);},0);}
 
 // Home: the numbers someone opens the tool to see.
 const homeCache={};let homeSequence=0;
@@ -1813,15 +1880,17 @@ function renderHome(data,message){
   $('home-kpis').replaceChildren(...cards);$('home-status').textContent=message||'';$('home-refresh').hidden=!showStore;
 }
 async function loadHome(force){
-  const sequence=++homeSequence,market=globalMarket;renderHome(homeCache[market]?.data,'');
+  // Cached per store and site, so switching stores never shows another store's numbers.
+  const sequence=++homeSequence,market=globalMarket,cacheKey=currentStore+'|'+market;renderHome(homeCache[cacheKey]?.data,'');
   if(currentRole==='viewer'||!await amazonReady()){if(sequence===homeSequence)renderHome(null,'');return;}
-  if(sequence!==homeSequence)return;
-  postJSON('/api/amazon/change/log',{}).then(rows=>{$('home-log').replaceChildren(...(rows.length?rows.slice(0,5).map(r=>{const line=el('div','home-row');line.append(el('b','',r.marketplace+' · '+r.sku),el('span','',r.changes.map(c=>c.label+(c.old?' '+c.old+' → ':' ')+c.new).join('；')),el('small',r.status==='ACCEPTED'?'amazon-clean':'ops-blocked',localTime(r.time)+' · '+r.user+' · '+(r.status==='ACCEPTED'?'已接受':'未成功')));return line;}):[el('p','hint','本次启动以来还没有提交过改动。')]));}).catch(()=>{});
-  const cached=homeCache[market];
+  if(sequence!==homeSequence||cacheKey!==currentStore+'|'+globalMarket)return;
+  const fresh=freshness();
+  postJSON('/api/amazon/change/log',{}).then(rows=>{if(!fresh()||sequence!==homeSequence)return;$('home-log').replaceChildren(...(rows.length?rows.slice(0,5).map(r=>{const line=el('div','home-row');line.append(el('b','',r.marketplace+' · '+r.sku),el('span','',r.changes.map(c=>c.label+(c.old?' '+c.old+' → ':' ')+c.new).join('；')),el('small',r.status==='ACCEPTED'?'amazon-clean':'ops-blocked',localTime(r.time)+' · '+r.user+' · '+(r.status==='ACCEPTED'?'已接受':'未成功')));return line;}):[el('p','hint','本次启动以来还没有提交过改动。')]));}).catch(()=>{});
+  const cached=homeCache[cacheKey];
   if(cached&&!force&&Date.now()-cached.time<5*60*1000){renderHome(cached.data,market+' 站点 · '+localTime(cached.time)+' 的数据');return;}
   renderHome(cached?.data,'正在读取 '+market+' 站点的数据…');
-  try{const data=await postJSON('/api/amazon/overview',{marketplace:market});homeCache[market]={data,time:Date.now()};if(sequence===homeSequence)renderHome(data,market+' 站点 · 刚刚更新');}
-  catch(e){if(sequence===homeSequence)renderHome(cached?.data,e.message);}
+  try{const data=await postJSON('/api/amazon/overview',{marketplace:market});if(!fresh())return;homeCache[cacheKey]={data,time:Date.now()};if(sequence===homeSequence)renderHome(data,market+' 站点 · 刚刚更新');}
+  catch(e){if(fresh()&&sequence===homeSequence)renderHome(cached?.data,e.message);}
 }
 $('home-refresh').addEventListener('click',()=>loadHome(true));
 $('logout').addEventListener('click',()=>{for(const key of Object.keys(homeCache))delete homeCache[key];homeSequence++;});
@@ -1865,9 +1934,11 @@ $('amazon-credentials').addEventListener('submit',event=>{event.preventDefault()
   const name=$('cred-name').value.trim();
   if(!name&&!Object.values(body).some(Boolean)&&$('cred-region').value===(amazonStatus?.region||'EU'))throw new Error('请先填写要保存的内容');
   if(credAdding&&!name)throw new Error('请给这个店铺起个名字');
-  const adding=credAdding,saved=await postJSON('/api/amazon/credentials',{...body,name,region:$('cred-region').value,store:adding?'new':currentStore});
+  const adding=credAdding,fresh=freshness(),saved=await postJSON('/api/amazon/credentials',{...body,name,region:$('cred-region').value,store:adding?'new':currentStore});
   clearCredentialFields();credAdding=false;
-  if(adding){await setStore(saved.store);}else{amazonStatus=saved;renderAmazonStatus();renderStoreSelect();setGlobalMarket(globalMarket,false);updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];}
+  // Saved for a store that is no longer the chosen one: the answer describes that store, so it is not shown as the current one.
+  if(!adding&&!fresh()){notify('已保存'+(saved.name?'店铺“'+saved.name+'”':'')+'的凭证');if(amazonStatus)renderAmazonStatus();return;}
+  if(adding){await setStore(saved.store);}else{amazonStatus=saved;if(saved.stores)knownStores=saved.stores;renderAmazonStatus();renderStoreSelect();setGlobalMarket(globalMarket,false);updatePrecheckActions();for(const key of Object.keys(homeCache))delete homeCache[key];}
   notify(saved.configured?(adding?'店铺已添加':'已保存')+'，点“测试连接”确认能连上':'已保存，但还不完整');
 });});
 $('cred-forget').addEventListener('click',()=>{

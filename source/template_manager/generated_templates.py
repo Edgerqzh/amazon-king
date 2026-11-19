@@ -72,7 +72,8 @@ def _xlsx(sheets, validations=None, defined_names=None):
                 cells = ''.join('<c r="%s%d" t="inlineStr" s="%d"><is><t xml:space="preserve">%s</t></is></c>' % (_column(col), row, int(header), _text(value)) for col, value in enumerate(values, 1) if value != '')
                 body.append('<row r="%d"%s>%s</row>' % (row, ' ht="48" customHeight="1"' if header else '', cells))
             rules = validations.get(name, [])
-            validation_xml = '<dataValidations count="%d">' % len(rules) + ''.join('<dataValidation type="list" allowBlank="1" showErrorMessage="1" errorStyle="stop" sqref=' + quoteattr(ref) + '><formula1>' + escape(formula) + '</formula1></dataValidation>' for ref, formula in rules) + '</dataValidations>' if rules else ''
+            # (ref, named range[, enforce]): a binding enum stops other values; suggestions only offer a list.
+            validation_xml = '<dataValidations count="%d">' % len(rules) + ''.join('<dataValidation type="list" allowBlank="1" showErrorMessage="%s" errorStyle="stop" sqref=' % ('1' if (rule[2] if len(rule) > 2 else True) else '0') + quoteattr(rule[0]) + '><formula1>' + escape(rule[1]) + '</formula1></dataValidation>' for rule in rules) + '</dataValidations>' if rules else ''
             frozen = 4 if name == 'Template' else 1
             put('xl/worksheets/sheet%d.xml' % i, '<worksheet xmlns="' + NS + '"><sheetViews><sheetView workbookViewId="0"><pane ySplit="%d" topLeftCell="A%d" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="%d" width="28" customWidth="1"/></cols><sheetData>' % (frozen, frozen + 1, max([len(r) for r in rows] or [1])) + ''.join(body) + '</sheetData>' + validation_xml + '</worksheet>')
     return out.getvalue()
@@ -97,13 +98,13 @@ def build_artifacts(definition, seller, token, generated_at):
                                        'productTypeVersion': definition['version']['number']})
     enums, names, rules = [], {}, []
     for index, field in enumerate(fields, 1):
-        options = field.get('options')
+        options = field.get('options') or field.get('suggestions')
         if not options:continue
         column = len(enums) + 1
         enums.append(options)
         name = 'spapi_enum_%d' % column
         names[name] = "'Enums'!$%s$1:$%s$%d" % (_column(column), _column(column), len(options))
-        rules.append(('%s5:%s1004' % (_column(index), _column(index)), name))
+        rules.append(('%s5:%s1004' % (_column(index), _column(index)), name, bool(field.get('options'))))
     enum_rows = [[options[row] if row < len(options) else '' for options in enums] for row in range(max([len(v) for v in enums] or [0]))]
     definitions = [['Field Name', 'Required?', 'Label', 'Value Type', 'Description']]
     definitions += [[f['key'], 'Required' if f['required'] else 'Conditionally Required' if f['conditional'] else 'Optional', f['label'], f['value_type'], f['description']] for f in fields]

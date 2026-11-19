@@ -71,6 +71,48 @@ class InventoryProgress:
             return dict(found[1]) if found and time.monotonic()-found[0] < 3600 else None
 
 
+WINDOWS_RESERVED = {'CON', 'PRN', 'AUX', 'NUL', *('COM%d' % i for i in range(1, 10)), *('LPT%d' % i for i in range(1, 10))}
+
+
+def upload_name(name):
+    """A plain file name that stays inside the temporary folder on Windows too ("D:x" would not)."""
+    if (not isinstance(name, str) or not name or len(name) > 200 or name in ('.', '..') or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)
+            or name[-1] in '. ' or name.split('.')[0].strip().upper() in WINDOWS_RESERVED):
+        raise ValueError('文件名无效：请去掉 \\ / : * ? " < > | 等字符后重新选择文件')
+    return name
+
+
+def keep_current_shop_data(current_root, stage):
+    """Carry the live shop roster, learned bindings and naming rules into a restored library.
+
+    Restores only run on a library without templates, but the roster and naming rules may already have been
+    set up there; a backup made earlier must not silently wipe them. Conflicts stop the restore instead.
+    """
+    if not (Path(current_root) / 'index.sqlite3').exists():
+        return
+    current = library.connect(Path(current_root))
+    try:
+        registry = [dict(r) for r in current.execute('SELECT shop,marketplace,fingerprint,account_hint,seller_id FROM shop_registry')]
+        bindings = [dict(r) for r in current.execute('SELECT fingerprint,shop,account_hint FROM shop_bindings')]
+        names = [dict(r) for r in current.execute('SELECT alias_key,alias,category,created_by,updated_at FROM product_aliases')]
+    finally:
+        current.close()
+    db = library.connect(Path(stage))
+    try:
+        try:
+            roster.apply(db, registry, bindings)
+        except ValueError as e:
+            raise ValueError('备份里的店铺对照与当前店铺名单冲突，未恢复：' + str(e)) from None
+        for row in names:  # the current naming rules are the newest decisions
+            db.execute('INSERT INTO product_aliases VALUES (:alias_key,:alias,:category,:created_by,:updated_at) '
+                       'ON CONFLICT(alias_key) DO UPDATE SET alias=excluded.alias,category=excluded.category,created_by=excluded.created_by,updated_at=excluded.updated_at', row)
+        db.commit()
+    except Exception:
+        db.rollback(); raise
+    finally:
+        db.close()
+
+
 def error_text(e):
     """Turn library errors into messages a team member can act on."""
     if isinstance(e, zipfile.BadZipFile):
@@ -581,9 +623,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = base64.b64decode(body['data'], validate=True)
             if len(data) > limit:
                 raise ValueError(f'文件不能超过 {limit//(1024*1024)} MB')
-            name = body.get('filename', '')
-            if not isinstance(name, str) or not name or '/' in name or '\\' in name or len(name) > 200:
-                raise ValueError('文件名无效')
+            name = upload_name(body.get('filename', ''))
             if self.path == '/api/aliases/inspect':
                 rows, info = aliases.parse_file(data, name, body.get('sheet'))
                 with lock.shared():result = {**aliases.preview(self.root, rows), **info}
@@ -755,6 +795,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with tempfile.TemporaryDirectory() as d, lock.exclusive():
                 source = Path(d) / name
+                if source.resolve().parent != Path(d).resolve():
+                    raise ValueError('文件名无效')
                 source.write_bytes(data)
                 if self.path == '/api/upload':
                     meta = {k: str(body.get(k, '')).strip() for k in ('marketplace', 'category', 'version')}
@@ -769,18 +811,21 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('仅支持恢复到空模板库，请先使用完整备份妥善保留现有库')
                     stage = Path(d) / 'restored'
                     library.run(SimpleNamespace(command='restore', library=str(stage), source=str(source)))
-                    # Preserve an empty existing directory until replacement has succeeded.
+                    keep_current_shop_data(self.root, stage)
                     self.root.parent.mkdir(parents=True, exist_ok=True)
                     replacement = self.root.parent / ('.restore-' + stage.name + '-' + library.uuid.uuid4().hex)
                     shutil.copytree(stage, replacement)
-                    old = self.root.with_name(self.root.name + '-empty-' + library.uuid.uuid4().hex)
-                    self.root.rename(old)
-                    try:
+                    if self.root.exists():
+                        # Keep the replaced library next to the new one instead of deleting it.
+                        old = self.root.with_name(self.root.name + '-before-restore-' + time.strftime('%Y%m%d-%H%M%S') + '-' + library.uuid.uuid4().hex[:6])
+                        self.root.rename(old)
+                        try:
+                            replacement.rename(self.root)
+                        except Exception:
+                            old.rename(self.root)
+                            raise
+                    else:
                         replacement.rename(self.root)
-                    except Exception:
-                        old.rename(self.root)
-                        raise
-                    shutil.rmtree(old)
                     restored = self.call('list', marketplace=None, category=None)
                     self.send({'count': len(restored)})
                 else:

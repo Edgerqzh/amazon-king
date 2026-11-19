@@ -99,6 +99,13 @@ class InventoryTests(unittest.TestCase):
         info = inventory.inspect(data, '库存.csv')
         self.assertEqual(info['headers'], ['SKU', '品名', '类目'])
 
+    def test_csv_doubled_quotes_after_a_plain_sample(self):
+        # Sniffer sees no "" in the first rows and would switch off doubled-quote escaping for the whole file.
+        plain = ''.join('%03d,毛巾%d,毛巾\n' % (i, i) for i in range(1000))
+        text = 'SKU,品名,类目\n' + plain + '999,"20"" 行李箱, 黑色",行李箱\n'
+        rows = inventory.read_tables(text.encode('utf-8'), '库存.csv')[0]['rows']
+        self.assertEqual(rows[-1][1], ['999', '20" 行李箱, 黑色', '行李箱'])
+
     def test_unknown_is_not_a_missing_template(self):
         r = self.report('SKU,品名\n001,特殊商品XYZ\n')
         self.assertEqual(r['summary']['missing'], 0)

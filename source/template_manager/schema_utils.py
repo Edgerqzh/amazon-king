@@ -11,16 +11,98 @@ import re
 MAX_DEPTH = 32
 MAX_NODES = 50000
 MAX_JSON_BYTES = 256 * 1024
+# Amazon's own product type schemas are far larger than any attribute JSON a person types.
+SCHEMA_MAX_NODES = 3000000
+SCHEMA_MAX_DEPTH = 100
+MAX_RESOLVE_STEPS = 1000000
 NAME = re.compile(r'[A-Za-z0-9_]{1,160}')
 GENERATED_FORMAT = 'spapi-fill-v1'
 MANIFEST_SHEET = 'Schema Manifest'
+# Sheets a generated workbook carries for the software, not for product data: the manifest (28,000-character
+# chunks), the dropdown lists and the field help. Generic upload readers skip them when the manifest is present.
+MACHINE_SHEETS = (MANIFEST_SHEET, 'Enums', 'Data Definitions')
+# Non-binding values from Amazon's "open enum": anyOf [{type T}, {type T, enum, enumNames}].
+# Stored as [[code, display name or None], ...]; never used to reject a value.
+SUGGESTIONS = 'x-suggestions'
+# Informational keywords (JSON Schema annotations plus Amazon's editable / hidden / $lifecycle / enumDeprecated).
+ANNOTATIONS = frozenset({'title', 'description', '$comment', 'examples', 'default', 'editable', 'hidden', 'deprecated', 'readOnly', 'writeOnly', '$lifecycle', 'enumDeprecated'})
+SCALAR_TYPES = ('string', 'number', 'integer', 'boolean')
 
 
 class SchemaError(ValueError):
     pass
 
 
-def strict_json(raw, limit=MAX_JSON_BYTES):
+def _scalar_ok(kind, value):
+    if kind == 'boolean':
+        return type(value) is bool
+    if kind == 'string':
+        return isinstance(value, str)
+    if type(value) is bool or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return False
+    return kind == 'number' or float(value).is_integer()
+
+
+def _union_suggestions(*groups):
+    result, seen = [], set()
+    for pairs in groups:
+        for code, name in pairs:
+            marker = (type(code).__name__, code)
+            if marker not in seen:
+                seen.add(marker)
+                result.append([code, name])
+    return result
+
+
+def _clean_suggestions(value, kind):
+    if not isinstance(value, list) or any(not isinstance(p, list) or len(p) != 2 or not _scalar_ok(kind, p[0]) or not (p[1] is None or isinstance(p[1], str)) for p in value):
+        return None
+    return value
+
+
+def _open_enum(base, variants):
+    """Amazon's anyOf [{type T}, {type T, enum, enumNames}] accepts any T; the enum is only a list of suggestions.
+
+    Returns {'type': T, SUGGESTIONS: [[code, name], ...]} for exactly that shape: one scalar type in every
+    branch, at least one branch without enum, and branches adding nothing but enum / enumNames / annotations.
+    Anything that really constrains (other types, required sets, ranges, lengths...) returns None.
+    """
+    declared, kinds, unconstrained, groups = base.get('type'), set(), False, []
+    for variant in variants:
+        kind = variant.get('type', declared)
+        if not isinstance(kind, str) or kind not in SCALAR_TYPES or set(variant) - ANNOTATIONS - {'type', 'enum', 'enumNames', SUGGESTIONS}:
+            return None
+        kinds.add(kind)
+        if SUGGESTIONS in variant:
+            nested = _clean_suggestions(variant[SUGGESTIONS], kind)
+            if nested is None:
+                return None
+            groups.append(nested)
+        if 'enum' not in variant:
+            unconstrained = True
+            continue
+        codes, names = variant['enum'], variant.get('enumNames')
+        if not isinstance(codes, list) or not codes or any(not _scalar_ok(kind, code) for code in codes):
+            return None
+        if not isinstance(names, list) or len(names) != len(codes):
+            names = [None] * len(codes)
+        retired = variant.get('enumDeprecated') if isinstance(variant.get('enumDeprecated'), list) else []
+        groups.append([[code, name if isinstance(name, str) else None] for code, name in zip(codes, names) if code not in retired])
+    if len(kinds) != 1 or not unconstrained or (declared is not None and kinds != {declared}):
+        return None
+    result = {'type': kinds.pop()}
+    if groups:
+        result[SUGGESTIONS] = _union_suggestions(*groups)
+    return result
+
+
+def suggested(node):
+    """Non-binding suggestion codes of a resolved node, or None."""
+    pairs = node.get(SUGGESTIONS) if isinstance(node, dict) else None
+    return [pair[0] for pair in pairs] if isinstance(pairs, list) else None
+
+
+def strict_json(raw, limit=MAX_JSON_BYTES, max_nodes=MAX_NODES, max_depth=MAX_DEPTH):
     if not isinstance(raw, (str, bytes)) or len(raw.encode('utf-8') if isinstance(raw, str) else raw) > limit:
         raise ValueError('JSON 内容过大或格式无效')
     def pairs(items):
@@ -38,7 +120,7 @@ def strict_json(raw, limit=MAX_JSON_BYTES):
         def visit(value, depth=0):
             nonlocal count
             count += 1
-            if depth > MAX_DEPTH or count > MAX_NODES:
+            if depth > max_depth or count > max_nodes:
                 raise ValueError('JSON 层级或元素过多')
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError('JSON 数字超出范围')
@@ -77,6 +159,12 @@ def _merge(left, right):
             continue
         elif key in ('items',) and isinstance(out[key], dict) and isinstance(value, dict):
             out[key] = _merge(out[key], value)
+        elif key == 'allOf' and isinstance(out[key], list) and isinstance(value, list):
+            # Both sides only add conditions; all of them still apply.
+            out[key] = out[key] + [v for v in value if v not in out[key]]
+        elif key == SUGGESTIONS and isinstance(out[key], list) and isinstance(value, list):
+            # Suggestions never restrict a value, so both sides' hints stay available.
+            out[key] = _union_suggestions(out[key], value)
         else:
             raise SchemaError('组合规则不明确：' + key)
     for lo, hi in [('minimum', 'maximum'), ('minItems', 'maxItems'), ('minLength', 'maxLength')]:
@@ -89,29 +177,38 @@ class Resolver:
         self.schema = schema if isinstance(schema, dict) else {}
         self.steps = 0
 
+    def lookup(self, ref):
+        """The raw (unresolved) target of a local JSON pointer such as #/$defs/language_tag."""
+        if not isinstance(ref, str) or not ref.startswith('#/'):
+            raise SchemaError('不支持外部或循环引用')
+        target = self.schema
+        for part in ref[2:].split('/'):
+            part = part.replace('~1', '/').replace('~0', '~')
+            if not isinstance(target, dict) or part not in target:raise SchemaError('本地引用不存在')
+            target = target[part]
+        return target
+
     def resolve(self, node, trail=(), depth=0):
         self.steps += 1
-        if self.steps > MAX_NODES or depth > MAX_DEPTH or not isinstance(node, dict):
+        if self.steps > MAX_RESOLVE_STEPS or depth > MAX_DEPTH or not isinstance(node, dict):
             raise SchemaError('规则层级或引用过多 / 非对象规则')
         node = copy.deepcopy(node)
         ref = node.pop('$ref', None)
         if ref is not None:
             if not isinstance(ref, str) or not ref.startswith('#/') or ref in trail:
                 raise SchemaError('不支持外部或循环引用')
-            target = self.schema
-            for part in ref[2:].split('/'):
-                part = part.replace('~1', '/').replace('~0', '~')
-                if not isinstance(target, dict) or part not in target:raise SchemaError('本地引用不存在')
-                target = target[part]
-            node = _merge(self.resolve(target, trail + (ref,), depth + 1), node)
+            node = _merge(self.resolve(self.lookup(ref), trail + (ref,), depth + 1), node)
         variants = node.pop('allOf', [])
         if not isinstance(variants, list):raise SchemaError('allOf 格式无效')
         conditions = []
         for variant in variants:
             resolved = self.resolve(variant, trail, depth + 1)
-            if any(key in resolved for key in ('if', 'then', 'else', 'dependentSchemas', 'dependentRequired', 'dependencies')):
+            # Conditions nested in an allOf branch stay conditions; they are never merged into plain rules.
+            nested = resolved.pop('allOf', [])
+            conditions.extend(c for c in nested if c not in conditions)
+            if any(key in resolved for key in ('if', 'then', 'else', 'not', 'dependentSchemas', 'dependentRequired', 'dependencies')):
                 conditions.append(resolved)
-            else:
+            elif resolved:
                 node = _merge(node, resolved)
         if conditions:
             node['allOf'] = conditions
@@ -120,6 +217,11 @@ class Resolver:
                 variants = node.pop(kind)
                 if not isinstance(variants, list) or not variants:raise SchemaError('分支规则为空')
                 resolved = [self.resolve(v, trail, depth + 1) for v in variants]
+                # Amazon's open enum (marketplace_id, language_tag, many values) is one plain type plus suggestions.
+                collapsed = _open_enum(node, resolved) if kind == 'anyOf' and len(resolved) > 1 else None
+                if collapsed is not None:
+                    node = _merge(node, collapsed)
+                    continue
                 if (kind == 'oneOf' and len(resolved) > 1) or any(v != resolved[0] for v in resolved[1:]):raise SchemaError('分支规则有歧义，须填写完整 JSON')
                 node = _merge(node, resolved[0])
         return node
@@ -216,6 +318,11 @@ def compile_fields(schema, market, max_columns=3000):
         if isinstance(options, list):
             if len(options)>5000 or any(isinstance(v, (dict, list)) or v is None for v in options):raise SchemaError('枚举过大或复杂')
             result['options'] = [str(v).lower() if isinstance(v, bool) else str(v) for v in options]
+        else:
+            # Open-enum hints become a non-enforcing dropdown; too many hints are simply not offered.
+            hints = suggested(node)
+            if hints and len(hints) <= 5000:
+                result['suggestions'] = [str(v).lower() if isinstance(v, bool) else str(v) for v in hints]
         return result
     def expand(node, key, mandatory, condition, depth=0, root_name='', label=''):
         if depth > 12:raise SchemaError('嵌套过深')
@@ -241,13 +348,15 @@ def compile_fields(schema, market, max_columns=3000):
                 if name in ('marketplace_id', 'language_tag', 'audience', 'currency'):
                     resolved = resolver.resolve(child)
                     if node_type(resolved) == 'string':
-                        options = resolved.get('enum')
+                        # A binding enum and open-enum suggestions both name the values this selector takes.
+                        options, hints = resolved.get('enum'), suggested(resolved)
                         if name == 'marketplace_id':
-                            if isinstance(options, list) and market not in options:raise SchemaError('站点规则与所选站点不同')
+                            if any(isinstance(values, list) and market not in values for values in (options, hints)):raise SchemaError('站点规则与所选站点不同')
                             if 'const' in resolved and resolved['const'] != market:raise SchemaError('站点常量不同')
                             chosen = market
                         elif isinstance(options, list) and len(options) == 1:chosen = options[0]
                         elif 'const' in resolved:chosen = resolved['const']
+                        elif options is None and isinstance(hints, list) and len(hints) == 1:chosen = hints[0]
                 if isinstance(chosen, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,100}', chosen):selectors += '[' + name + '=' + chosen + ']'
                 else:editable[name] = child
             if not editable:raise SchemaError('属性只有选择器；请提供完整 JSON')
@@ -322,7 +431,15 @@ def validate_json_attribute(value, node, schema):
                     except (ValueError, TypeError):pass
                 if matches == 0 or ('oneOf' in node and matches != 1):raise ValueError('属性 JSON 不符合分支类型')
                 return
-            if '$ref' in base:raise ValueError('属性 JSON 的本地引用无法安全解析')
+            if '$ref' in base:
+                # A local reference whose target keeps real branches: check against that target itself,
+                # exactly as if it were written inline. Constraining siblings next to $ref stay unsupported.
+                try:target = resolver.lookup(base['$ref'])
+                except SchemaError:target = None
+                if not isinstance(target, dict) or set(base) - ANNOTATIONS - {'$ref'}:raise ValueError('属性 JSON 的本地引用无法安全解析')
+                check(value, target, depth + 1)
+                for alternative in node.get('allOf', []):check(value, alternative, depth + 1)
+                return
             for alternative in node.get('allOf', []):check(value, alternative, depth + 1)
             node = base
         kind = node.get('type')

@@ -131,6 +131,10 @@ def schema_item(schema, name):
 def coerce(value, leaf):
     """Use the product type definition to send numbers, booleans and option codes, not display text."""
     variants = [leaf] + [v for key in ('anyOf', 'oneOf') for v in leaf.get(key) or [] if isinstance(v, dict)]
+    hints = leaf.get(schema_utils.SUGGESTIONS)
+    if isinstance(hints, list):
+        # Open-enum suggestions: a display name still maps to its code; any other text is kept as typed.
+        variants.append({'enum': [pair[0] for pair in hints], 'enumNames': [pair[1] for pair in hints]})
     text = value.strip()
     for variant in variants:
         codes, names = variant.get('enum'), variant.get('enumNames')
@@ -163,6 +167,8 @@ def convert(values, fields, market, schema=None):
     by_key = {f['key']: f for f in fields}
     attributes, product_type, skipped, identifier = {}, '', [], {}
     json_roots = set()
+    # (id(parent), name) -> (parent, name, [(selector values, {#n: item}), ...]); laid out after all columns are read.
+    arrays = {}
     scalar_roots = {p[0][0] for k, v in values.items() if isinstance(v, str) and v.strip() and (p := parse_key(k))}
     for key, raw in values.items():
         if not isinstance(raw, str) or not raw.strip():
@@ -190,10 +196,12 @@ def convert(values, fields, market, schema=None):
         if role == 'feed_product_type':
             product_type = raw.strip()
             continue
-        if role in ('product_id', 'product_id_type'):
+        path = parse_key(key)
+        # A generated table names the real attribute path (e.g. externally_assigned_product_identifier#1.value /
+        # #1.type); build it from that path. Only legacy identifier columns go through the type + value pairing.
+        if role in ('product_id', 'product_id_type') and not (path is not None and field.get('generated_format') == schema_utils.GENERATED_FORMAT):
             identifier[role] = raw.strip()
             continue
-        path = parse_key(key)
         if path is None:
             skipped.append(field.get('label') or key)
             continue
@@ -204,15 +212,35 @@ def convert(values, fields, market, schema=None):
                 node[name] = coerce(raw, leaf)
                 break
             if index is None:
-                node = node.setdefault(name, {})
+                child = node.setdefault(name, {})
+                if not isinstance(child, dict):
+                    raise ValueError('列路径与其他列冲突：' + key[:120])
+                node = child
                 continue
-            items = node.setdefault(name, [])
-            while len(items) < index:
-                items.append({})
-            node = items[index - 1]
+            slots = arrays.get((id(node), name))
+            if slots is None:
+                if name in node:
+                    raise ValueError('列路径与其他列冲突：' + key[:120])
+                node[name] = []
+                slots = arrays[(id(node), name)] = (node, name, [])
+            # An array entry is identified by its selector values plus #n: [language_tag=en_AE]#1 and
+            # [language_tag=ar_AE]#1 (or audience ALL / B2B) are two entries, never one overwritten entry.
+            # A column naming only some of a group's selectors (same values) still belongs to that group.
+            groups = slots[2]
+            group = next((g for g in groups if g[0] == selectors), None) or next((g for g in groups if all(g[0][s] == v for s, v in selectors.items() if s in g[0])), None)
+            if group is None:
+                group = ({}, {})
+                groups.append(group)
+            group[0].update(selectors)
+            item = group[1].setdefault(index, {})
             for selector, chosen in selectors.items():
-                selector_path = path[:depth + 1] + [(selector, {}, None)]
-                node[selector] = coerce(chosen, schema_leaf(schema, selector_path))
+                if selector not in item:
+                    selector_path = path[:depth + 1] + [(selector, {}, None)]
+                    item[selector] = coerce(chosen, schema_leaf(schema, selector_path))
+            node = item
+    # Selector groups keep column order; inside a group entries follow #n, with the same gap placeholders as before.
+    for parent, name, groups in arrays.values():
+        parent[name] = [items.get(number, {}) for _, items in groups for number in range(1, max(items) + 1)]
     if identifier.get('product_id'):
         kind = identifier.get('product_id_type', '').casefold()
         if kind == 'asin':
@@ -326,7 +354,7 @@ class Definitions:
             if not isinstance(raw, bytes) or not hmac.compare_digest(hashlib.new(algorithm, raw).digest(), expected):
                 raise spapi.SpApiError('亚马逊规则校验和不符，未生成模板')
             schema_hash = hashlib.sha256(raw).hexdigest()
-            try:schema = schema_utils.strict_json(raw, limit=16 * 1024 * 1024)
+            try:schema = schema_utils.strict_json(raw, limit=16 * 1024 * 1024, max_nodes=schema_utils.SCHEMA_MAX_NODES, max_depth=schema_utils.SCHEMA_MAX_DEPTH)
             except ValueError:raise spapi.SpApiError('亚马逊字段定义不是有效的有界 JSON') from None
         else:
             # Legacy minimal mocks and older clients remain usable for preview, never generation.
