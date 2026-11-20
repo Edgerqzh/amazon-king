@@ -1465,7 +1465,7 @@ function renderAmazonResult(){
     const state=cell(tr,'');const labels=item.status.length?item.status.map(code=>LISTING_STATUS[code]||code):['不可售'];
     for(const text of labels){const tag=document.createElement('span');tag.className='report-level '+(item.status.length?'level-ok':'level-error');tag.textContent=text;state.append(tag,' ');}
     const product=cell(tr,''),title=document.createElement('b');title.textContent=item.title||'（无标题）';const small=document.createElement('small');small.textContent=[item.asin,item.product_type].filter(Boolean).join(' · ');product.append(title,small);
-    const offer=cell(tr,'');const price=document.createElement('b');price.textContent=item.offers.length?item.offers.map(o=>o.amount+' '+o.currency+(o.type&&o.type!=='B2C'?'（'+o.type+'）':'')).join('；'):'未读到售价';const stock=document.createElement('small');stock.textContent=item.stock.length?item.stock.map(f=>(f.channel==='DEFAULT'?'自配送':f.channel||'渠道')+'：'+(f.quantity??'—')).join('；'):'未读到自配送数量';offer.append(price,stock);if(currentRole!=='viewer'){const edit=el('button','text-button','改价 / 改库存');edit.type='button';edit.addEventListener('click',()=>{$('ops-lines').value=item.sku+', , ';location.hash='ops';notify('已带入 '+item.sku+'，在 SKU 后面填新售价和新库存');});offer.append(edit);}
+    const offer=cell(tr,'');const price=document.createElement('b');price.textContent=item.offers.length?item.offers.map(o=>o.amount+' '+o.currency+(o.type&&o.type!=='B2C'?'（'+o.type+'）':'')).join('；'):'未读到售价';const stock=document.createElement('small');stock.textContent=item.stock.length?item.stock.map(f=>(f.channel==='DEFAULT'?'自配送':f.channel||'渠道')+'：'+(f.quantity??'—')).join('；'):'未读到自配送数量';offer.append(price,stock);if(currentRole!=='viewer'){const edit=el('button','text-button','改价 / 改库存');edit.type='button';edit.addEventListener('click',()=>{opsGridSet([[item.sku,'','']]);location.hash='ops';setTimeout(()=>opsGridFocus(0,1),50);notify('已带入 '+item.sku+'，在后面填新售价和新库存');});offer.append(edit);}
     const issues=cell(tr,'');
     if(!item.issues.length){issues.textContent='没有问题';issues.className='amazon-clean';}
     for(const issue of item.issues){const box=document.createElement('div');box.className='amazon-issue';const head=document.createElement('b');head.textContent=issue.title+(issue.attributes.length?' · '+issue.attributes.join('、'):'');const hint=document.createElement('p');hint.textContent=issue.hint;const original=document.createElement('small');original.className='report-original';original.textContent='亚马逊原文'+(issue.code?' '+issue.code:'')+'：'+issue.message;box.append(reportChip(issue.severity),head,hint,original);issues.append(box);}
@@ -1547,18 +1547,85 @@ async function withButton(button,label,work){if(button.disabled)return;const tex
 
 // Price and stock: read current values, preview at Amazon, then one confirmed submit per SKU.
 let opsResult=null;
-function parseOpsLines(){
-  const items=[];
-  for(const [index,line] of $('ops-lines').value.split(/\r?\n/).entries()){
-    if(!line.trim())continue;const parts=line.split(/[,，\t]/).map(p=>p.trim());
-    if(parts.length>3||!parts[0])throw new Error('第 '+(index+1)+' 行格式不对，应为：SKU, 新售价, 新库存');
-    const item={sku:parts[0],price:parts[1]||null,quantity:null};
-    if(parts[2]){if(!/^\d+$/.test(parts[2]))throw new Error('第 '+(index+1)+' 行的库存应为整数');item.quantity=Number(parts[2]);}
-    if(item.price&&!/^\d{1,7}(\.\d{1,2})?$/.test(item.price))throw new Error('第 '+(index+1)+' 行的售价应为最多两位小数的数字');
-    if(item.price==null&&item.quantity==null)throw new Error('第 '+(index+1)+' 行没有填写新售价或新库存');
-    items.push(item);
+// A small spreadsheet: SKU / 新售价 / 新库存. Paste several rows and columns straight from Excel.
+// The page sends them to Amazon OPS_BATCH at a time, so one preview request stays short.
+const OPS_MAX=200,OPS_BATCH=20,OPS_START_ROWS=10;
+function opsGridBody(){return $('ops-grid-rows');}
+function opsGridLines(){return [...opsGridBody().rows];}
+function opsGridRow(values){
+  const tr=el('tr');tr.append(el('td','ops-grid-num'));
+  for(let c=0;c<3;c++){
+    const td=el('td'),input=el('input');input.type='text';input.spellcheck=false;input.autocomplete='off';input.dataset.col=String(c);
+    input.value=values?.[c]??'';if(c===1)input.inputMode='decimal';if(c===2)input.inputMode='numeric';
+    input.setAttribute('aria-label',['SKU','新售价','新库存'][c]);td.append(input);tr.append(td);
   }
-  if(!items.length)throw new Error('请先填写要修改的 SKU');if(items.length>20)throw new Error('一次最多 20 行，请分批');
+  const td=el('td','ops-grid-tool'),del=el('button','ops-grid-del','×');del.type='button';del.title='删除这一行';del.setAttribute('aria-label','删除这一行');
+  del.addEventListener('click',()=>{tr.remove();opsGridTidy();});td.append(del);tr.append(td);
+  return tr;
+}
+function opsGridValues(tr){return [...tr.querySelectorAll('input')].map(i=>i.value.trim());}
+function opsGridTidy(){
+  const body=opsGridBody();
+  while(body.rows.length<OPS_START_ROWS)body.append(opsGridRow());
+  const last=body.rows[body.rows.length-1];
+  if(body.rows.length<OPS_MAX&&opsGridValues(last).some(Boolean))body.append(opsGridRow());  // always one empty row to type into
+  let filled=0;opsGridLines().forEach((tr,i)=>{tr.cells[0].textContent=String(i+1);if(opsGridValues(tr).some(Boolean))filled++;});
+  $('ops-grid-count').textContent='已填 '+filled+' 行 · 一次最多 '+OPS_MAX+' 行';
+}
+function opsGridSet(rows){opsGridBody().replaceChildren(...(rows||[]).slice(0,OPS_MAX).map(opsGridRow));opsGridTidy();}
+function opsGridFocus(row,col){
+  const body=opsGridBody();while(row>=body.rows.length&&body.rows.length<OPS_MAX)body.append(opsGridRow());
+  const tr=body.rows[Math.max(0,Math.min(row,body.rows.length-1))];opsGridTidy();
+  const input=tr.querySelectorAll('input')[col];input.focus();input.select();
+}
+function opsPasteRows(text){
+  // Excel copies tab-separated rows; the old "SKU, 价格, 库存" lines still work.
+  const lines=text.replace(/\r\n?/g,'\n').replace(/\n$/,'').split('\n');
+  return lines.map(line=>(line.includes('\t')?line.split('\t'):line.split(/[,，]/)).map(v=>v.trim().replace(/^"(.*)"$/,'$1')));
+}
+opsGridBody().addEventListener('paste',event=>{
+  const input=event.target.closest('input');if(!input)return;
+  const text=event.clipboardData?.getData('text/plain')||'';
+  if(!/[\t\n,，]/.test(text.trim()))return;  // a single value: let the browser paste it normally
+  event.preventDefault();
+  const rows=opsPasteRows(text),start=input.closest('tr').sectionRowIndex,col=Number(input.dataset.col);
+  const body=opsGridBody();let dropped=0;
+  rows.forEach((values,r)=>{
+    const at=start+r;if(at>=OPS_MAX){dropped++;return;}
+    while(body.rows.length<=at)body.append(opsGridRow());
+    const inputs=body.rows[at].querySelectorAll('input');
+    values.forEach((v,c)=>{if(col+c<3)inputs[col+c].value=v;});
+  });
+  opsGridTidy();
+  if(dropped)notify('一次最多 '+OPS_MAX+' 行，后面 '+dropped+' 行没有粘贴进来，请分批',true);
+});
+opsGridBody().addEventListener('input',()=>{opsGridTidy();});
+opsGridBody().addEventListener('keydown',event=>{
+  const input=event.target.closest('input');if(!input||event.isComposing)return;
+  const row=input.closest('tr').sectionRowIndex,col=Number(input.dataset.col);
+  if(event.key==='Enter'){event.preventDefault();opsGridFocus(row+(event.shiftKey?-1:1),col);}
+  else if(event.key==='ArrowDown'){event.preventDefault();opsGridFocus(row+1,col);}
+  else if(event.key==='ArrowUp'){event.preventDefault();opsGridFocus(row-1,col);}
+});
+$('ops-grid-add').addEventListener('click',()=>{const body=opsGridBody();for(let i=0;i<10&&body.rows.length<OPS_MAX;i++)body.append(opsGridRow());opsGridTidy();});
+$('ops-grid-clear').addEventListener('click',()=>{if(opsGridLines().some(tr=>opsGridValues(tr).some(Boolean))&&!confirm('清空表格里填好的所有行？'))return;opsGridSet([]);});
+opsGridSet([]);
+function parseOpsLines(){
+  const items=[],seen=new Map();
+  for(const tr of opsGridLines())tr.classList.remove('bad');
+  for(const [index,tr] of opsGridLines().entries()){
+    const [sku,price,quantity]=opsGridValues(tr);
+    if(!sku&&!price&&!quantity)continue;
+    const fail=message=>{tr.classList.add('bad');tr.scrollIntoView({block:'nearest'});throw new Error('第 '+(index+1)+' 行'+message);};
+    if(!sku)fail('没有填写 SKU');
+    if(seen.has(sku))fail('的 SKU 和第 '+seen.get(sku)+' 行重复');
+    seen.set(sku,index+1);
+    if(price&&!/^\d{1,7}(\.\d{1,2})?$/.test(price))fail('的售价应为最多两位小数的数字');
+    if(quantity&&!/^\d+$/.test(quantity))fail('的库存应为整数');
+    if(!price&&!quantity)fail('没有填写新售价或新库存');
+    items.push({sku,price:price||null,quantity:quantity?Number(quantity):null});
+  }
+  if(!items.length)throw new Error('请先填写要修改的 SKU');if(items.length>OPS_MAX)throw new Error('一次最多 '+OPS_MAX+' 行，请分批');
   return items;
 }
 function renderOps(){
@@ -1590,13 +1657,23 @@ function renderOps(){
 }
 $('ops-form').addEventListener('submit',event=>{event.preventDefault();withButton($('ops-preview'),'正在读取并预检…',async()=>{
   let items;try{items=parseOpsLines();}catch(e){$('ops-status').textContent=e.message;throw e;}
-  $('ops-status').textContent='正在向亚马逊读取 '+items.length+' 个 SKU 的当前值并预检，这一步不修改店铺。';
-  const fresh=freshness('ops-market');let result;
-  try{result=await postJSON('/api/amazon/change/preview',{marketplace:$('ops-market').value,items});}catch(e){if(!fresh()){$('ops-status').textContent=STALE_NOTE;return;}$('ops-status').textContent=e.message;throw e;}
-  if(!fresh()){$('ops-status').textContent=STALE_NOTE;return;}
-  opsResult=result;
-  const ready=opsResult.items.filter(r=>r.token).length;
-  $('ops-status').textContent=opsResult.marketplace+' 站点：'+ready+' 个可以提交，'+(opsResult.items.length-ready)+' 个不能提交。请逐个核对后提交；预检结果 '+opsResult.valid_minutes+' 分钟内有效，过期需重新预检。';renderOps();
+  const fresh=freshness('ops-market'),marketplace=$('ops-market').value,batches=Math.ceil(items.length/OPS_BATCH);
+  let result=null,failure='';
+  for(let b=0;b<batches;b++){
+    $('ops-status').textContent='正在向亚马逊读取当前值并预检：'+Math.min(b*OPS_BATCH,items.length)+' / '+items.length+' 个 SKU（这一步不修改店铺）…';
+    let part;
+    try{part=await postJSON('/api/amazon/change/preview',{marketplace,items:items.slice(b*OPS_BATCH,(b+1)*OPS_BATCH)});}
+    catch(e){if(!fresh()){$('ops-status').textContent=STALE_NOTE;return;}failure=e.message;break;}
+    if(!fresh()){$('ops-status').textContent=STALE_NOTE;return;}
+    result=result?{...part,items:result.items.concat(part.items)}:part;
+    opsResult=result;renderOps();  // show each batch as it arrives
+  }
+  if(!result){$('ops-status').textContent=failure;throw new Error(failure);}
+  const ready=result.items.filter(r=>r.token).length,left=items.length-result.items.length;
+  $('ops-status').textContent=result.marketplace+' 站点：'+ready+' 个可以提交，'+(result.items.length-ready)+' 个不能提交。'
+    +(left?'还有 '+left+' 个没有预检（'+failure+'），请稍后对剩下的重新预检。':'')
+    +'请逐个核对后提交；预检结果 '+result.valid_minutes+' 分钟内有效，过期需重新预检。';
+  if(failure)notify('预检中途出错：'+failure,true);
 });});
 async function loadOpsLog(){
   try{
@@ -1711,7 +1788,7 @@ $('check-run').addEventListener('click',()=>withButton($('check-run'),'正在对
     return box;
   }));
 }));
-$('logout').addEventListener('click',()=>{exportSequence++;if(typeof window.resetWatch==='function')window.resetWatch();if(typeof window.resetInsights==='function')window.resetInsights();clearTimeout(exportTimer);opsResult=null;ordersResult=null;fbaResult=null;exportId='';$('ops-lines').value='';renderOps();renderOrders();for(const id of ['fba-result','sales-result','export-result','check-result'])$(id).hidden=true;for(const id of ['ops-status','fba-status','orders-status-text','sales-status','export-status','check-status'])$(id).textContent='';$('ops-log').replaceChildren();$('export-create').disabled=false;});
+$('logout').addEventListener('click',()=>{exportSequence++;if(typeof window.resetWatch==='function')window.resetWatch();if(typeof window.resetInsights==='function')window.resetInsights();clearTimeout(exportTimer);opsResult=null;ordersResult=null;fbaResult=null;exportId='';opsGridSet([]);renderOps();renderOrders();for(const id of ['fba-result','sales-result','export-result','check-result'])$(id).hidden=true;for(const id of ['ops-status','fba-status','orders-status-text','sales-status','export-status','check-status'])$(id).textContent='';$('ops-log').replaceChildren();$('export-create').disabled=false;});
 
 // Listing a new product: only rows Amazon just validated, one confirmed SKU at a time.
 let fillSubmitItems=[];

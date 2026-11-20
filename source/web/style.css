@@ -736,3 +736,19 @@ a.kpi:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:var
 .inventory-gen-bar{margin:14px 0 4px;padding:12px 15px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}.inventory-gen-bar .hint{margin:0 0 8px}.inv-gen-actions{display:flex;flex-wrap:wrap;gap:8px}.inv-gen-actions .button{font-size:12px;padding:8px 12px}.inv-gen{margin-top:6px}.inv-gen-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.inv-gen-row select{max-width:100%;min-width:0;flex:1 1 240px;font-size:12px}.inv-gen-status{margin:4px 0 0;font-size:11px;color:var(--muted)}.inv-gen-status.ok{color:var(--ink-2)}.inv-gen-status.bad{color:var(--warn)}
 
 .look-filters{grid-template-columns:minmax(160px,1fr) minmax(280px,1.6fr) auto}.look-filters>#look-count{grid-column:1/-1;margin-top:-6px}.look-price-filter{display:flex;flex-direction:column;gap:6px;min-width:0}.look-price-label{font-size:12px;color:var(--ink-2)}.look-price-row{display:flex;gap:8px;min-width:0}.look-price-row select{flex:0 1 auto;min-width:0}.look-price-row input{flex:1 1 90px;min-width:0}#look-export-xlsx{white-space:nowrap}@media(max-width:900px){.look-filters{grid-template-columns:1fr 1fr}}@media(max-width:650px){.look-filters{grid-template-columns:1fr}.look-price-row{flex-wrap:wrap}}
+
+/* 调价与库存: spreadsheet-style input */
+.ops-grid-field{display:flex;flex-direction:column;gap:8px}
+.ops-grid-wrap{max-height:440px;overflow:auto;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface)}
+.ops-grid{width:100%;border-collapse:collapse;table-layout:fixed;font:13px var(--mono)}
+.ops-grid-num-col{width:44px}.ops-grid-sku-col{width:46%}.ops-grid-tool-col{width:36px}
+.ops-grid th{position:sticky;top:0;z-index:1;background:var(--surface-2);color:var(--muted,#6b665d);font:600 12px/1.4 inherit;text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);border-right:1px solid var(--line-soft)}
+.ops-grid td{padding:0;border-bottom:1px solid var(--line-soft);border-right:1px solid var(--line-soft);height:32px}
+.ops-grid td.ops-grid-num{background:var(--surface-2);color:var(--faint,#9a958b);text-align:center;font-size:11px}
+.ops-grid td input{display:block;width:100%;height:32px;min-height:0;margin:0;padding:0 10px;border:0;border-radius:0;background:transparent;box-shadow:none;font:inherit;color:var(--ink)}
+.ops-grid td input:focus{outline:2px solid var(--focus);outline-offset:-2px;background:var(--accent-soft)}
+.ops-grid tr.bad td{background:var(--danger-soft)}
+.ops-grid td.ops-grid-tool{text-align:center;border-right:0}
+.ops-grid-del{border:0;background:none;color:var(--faint,#9a958b);font-size:16px;line-height:1;cursor:pointer;padding:4px 8px;border-radius:6px}
+.ops-grid-del:hover{color:var(--danger);background:var(--danger-soft)}
+.ops-grid-tools{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px}
