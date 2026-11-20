@@ -96,6 +96,27 @@ def _open_enum(base, variants):
     return result
 
 
+FORMATS = 'x-formats'
+# Formats no single string can satisfy twice, so oneOf over them is the same as anyOf.
+EXCLUSIVE_FORMATS = frozenset({'date', 'date-time'})
+FORMAT_HINTS = {'date': '日期，如 2026-11-20', 'date-time': '日期时间，如 2026-11-20T09:30:00Z'}
+
+
+def _format_choice(base, variants):
+    """Amazon's dates: oneOf [{type string, format date}, {type string, format date-time}] is one string column."""
+    declared, kinds, formats = base.get('type'), set(), []
+    for variant in variants:
+        kind = variant.get('type', declared)
+        if kind != 'string' or set(variant) - ANNOTATIONS - {'type', 'format'} or variant.get('format') not in EXCLUSIVE_FORMATS:
+            return None
+        kinds.add(kind)
+        if variant['format'] in formats:return None
+        formats.append(variant['format'])
+    if kinds != {'string'} or (declared is not None and declared != 'string'):
+        return None
+    return {'type': 'string', FORMATS: formats}
+
+
 def suggested(node):
     """Non-binding suggestion codes of a resolved node, or None."""
     pairs = node.get(SUGGESTIONS) if isinstance(node, dict) else None
@@ -134,7 +155,31 @@ def strict_json(raw, limit=MAX_JSON_BYTES, max_nodes=MAX_NODES, max_depth=MAX_DE
         raise ValueError('JSON 格式无效，请填写完整属性 JSON') from e
 
 
+CONDITION_PARTS = ('if', 'then', 'else')
+
+
+def _split_conditions(node):
+    """Take a node's own if/then/else and not out as separate conditions (each still applies on its own)."""
+    rest, conditions = dict(node), []
+    if any(key in rest for key in CONDITION_PARTS):
+        conditions.append({key: rest.pop(key) for key in CONDITION_PARTS if key in rest})
+    if 'not' in rest:
+        conditions.append({'not': rest.pop('not')})
+    return rest, conditions
+
+
 def _merge(left, right):
+    if any(key in left and key in right and left[key] != right[key] for key in CONDITION_PARTS + ('not',)):
+        # Amazon defines some attributes in several allOf branches, each with its own if/then
+        # (e.g. fulfillment_availability items). Both conditions apply, so keep both as allOf entries.
+        left, first = _split_conditions(left)
+        right, second = _split_conditions(right)
+        out = _merge(left, right)
+        kept = out.get('allOf', []) if isinstance(out.get('allOf'), list) else []
+        for condition in first + second:
+            if condition not in kept:kept = kept + [condition]
+        out['allOf'] = kept
+        return out
     out = copy.deepcopy(left)
     for key, value in right.items():
         if key not in out:
@@ -219,6 +264,8 @@ class Resolver:
                 resolved = [self.resolve(v, trail, depth + 1) for v in variants]
                 # Amazon's open enum (marketplace_id, language_tag, many values) is one plain type plus suggestions.
                 collapsed = _open_enum(node, resolved) if kind == 'anyOf' and len(resolved) > 1 else None
+                if collapsed is None and len(resolved) > 1:
+                    collapsed = _format_choice(node, resolved)
                 if collapsed is not None:
                     node = _merge(node, collapsed)
                     continue
@@ -314,6 +361,11 @@ def compile_fields(schema, market, max_columns=3000):
         kind = node_type(node)
         if kind in ('object', 'array', 'null'):raise SchemaError('复杂叶节点')
         result = dict(key=key, label=label, required=bool(mandatory), conditional=bool(condition and not mandatory), value_type=kind, description=str(node.get('description') or '')[:12000])
+        formats = node.get(FORMATS) if isinstance(node.get(FORMATS), list) else [node['format']] if isinstance(node.get('format'), str) else []
+        hints = [FORMAT_HINTS[f] for f in formats if f in FORMAT_HINTS]
+        if hints:
+            result['format'] = formats
+            result['description'] = ('填写格式：' + ' 或 '.join(hints) + '。' + result['description'])[:12000]
         options = node.get('enum')
         if isinstance(options, list):
             if len(options)>5000 or any(isinstance(v, (dict, list)) or v is None for v in options):raise SchemaError('枚举过大或复杂')
@@ -336,6 +388,14 @@ def compile_fields(schema, market, max_columns=3000):
             count = high if high is not None else max(low, 5 if root_name == 'bullet_point' and depth == 0 else 1)
             if not count:raise SchemaError('空数组规则')
             item = resolver.resolve(node.get('items'))
+            if depth > 0 and node_type(item) in ('string', 'integer', 'number', 'boolean'):
+                # A list of plain values inside an attribute (e.g. color.standardized_values, the colour family):
+                # one column; several values are separated by ";".
+                result = field(key, item, mandatory and low >= 1, condition, label)
+                result['list_max'] = high
+                if high != 1:
+                    result['description'] = ('可填多个，用 ; 分隔' + ('（最多 %d 个）' % high if high else '') + '。' + result['description'])[:12000]
+                return [result]
             if node_type(item) != 'object':raise SchemaError('数组元素不是明确对象')
             item_props = item.get('properties') or {}
             if not item_props or item.get('additionalProperties') not in (None, False) or item.get('patternProperties'):

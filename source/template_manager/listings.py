@@ -209,7 +209,16 @@ def convert(values, fields, market, schema=None):
         node = attributes
         for depth, (name, selectors, index) in enumerate(path):
             if depth == len(path) - 1:
-                node[name] = coerce(raw, leaf)
+                if isinstance(leaf, dict) and leaf.get('type') == 'array' and isinstance(leaf.get('items'), dict):
+                    # One column for a list of plain values: "Beige; Brown" -> ["Beige", "Brown"].
+                    try:item_leaf = schema_utils.Resolver(schema).resolve(leaf['items'])
+                    except schema_utils.SchemaError:item_leaf = leaf['items']
+                    parts = re.split(r'[;；]', raw)
+                    node[name] = [coerce(part, item_leaf) for part in parts if part.strip()]
+                    if isinstance(leaf.get('maxItems'), int) and len(node[name]) > leaf['maxItems']:
+                        raise ValueError('“%s”最多填 %d 个值' % (field.get('label') or key, leaf['maxItems']))
+                else:
+                    node[name] = coerce(raw, leaf)
                 break
             if index is None:
                 child = node.setdefault(name, {})

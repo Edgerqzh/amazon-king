@@ -24,8 +24,8 @@ class OpenEnumTests(unittest.TestCase):
         schema = shape.realistic_schema()
         fields, _ = schema_utils.compile_fields(schema, MARKET)
         json_attributes = {f['json_attribute'] for f in fields if f['value_type'] == 'json'}
-        # Only the genuinely unsupported shapes stay advanced JSON: an array of strings, and string-or-number branches.
-        self.assertEqual(json_attributes, {'color', 'capacity_hint'})
+        # Only string-or-number branches stay advanced JSON; a nested list of plain values (color) is now one column.
+        self.assertEqual(json_attributes, {'capacity_hint'})
         self.assertGreaterEqual(1 - len(json_attributes) / len(schema['properties']), 0.95)
         by = keyed(fields)
         for key in ('item_name' + SELECT + '#1.value', 'bullet_point' + SELECT + '#5.value', 'externally_assigned_product_identifier' + SELECT + '#1.value',
@@ -129,7 +129,7 @@ class GeneratedFlowTests(unittest.TestCase):
 
     def test_identifier_value_and_type_survive_fill_and_precheck_and_suggestions_do_not_block(self):
         preview = self.service.generate(USER, {'marketplace': 'AE', 'product_type': 'SUITCASE'})
-        self.assertEqual(preview['json_count'], 2);self.assertLess(preview['field_count'], 512)
+        self.assertEqual(preview['json_count'], 1);self.assertLess(preview['field_count'], 512)
         saved = self.service.save(USER, {'token': preview['token'], 'shop': 'Shop A'})
         template = library.verified(self.root, saved)
         keys = [f['key'] for f in preview['fields']]
@@ -235,3 +235,64 @@ class WideUploadTests(unittest.TestCase):
 
 
 if __name__ == '__main__':unittest.main()
+
+
+class RealAmazonShapeTests(unittest.TestCase):
+    """Shapes copied from Amazon's live SKIN_MOISTURIZER / SKIN_FOUNDATION_CONCEALER schemas (2026-11)."""
+
+    def schema(self):
+        defs = {'marketplace_id': {'type': 'string', 'anyOf': [{'type': 'string'}, {'type': 'string', 'enum': [MARKET], 'enumNames': ['Amazon.ae']}]},
+                'language_tag': {'type': 'string', 'anyOf': [{'type': 'string'}, {'type': 'string', 'enum': ['en_AE'], 'enumNames': ['English']}]}}
+        dated = {'type': 'string', 'oneOf': [{'type': 'string', 'format': 'date'}, {'type': 'string', 'format': 'date-time'}]}
+        stock_item = {'type': 'object', 'required': ['fulfillment_channel_code'], 'additionalProperties': False,
+                      'properties': {'fulfillment_channel_code': {'type': 'string'}, 'quantity': {'type': 'integer', 'minimum': 0},
+                                     'is_inventory_available': {'type': 'boolean'}, 'restock_date': dated}}
+        default = {'required': ['fulfillment_channel_code'], 'properties': {'fulfillment_channel_code': {'enum': ['DEFAULT']}}}
+        # Amazon repeats fulfillment_availability in two allOf branches, each items node carrying its own if/then.
+        first = {'properties': {'fulfillment_availability': {'items': {'if': {'not': {'allOf': [default, {'not': {'required': ['is_inventory_available']}}]}}, 'then': {'not': {'required': ['quantity']}}}}}}
+        second = {'properties': {'fulfillment_availability': {'items': {'if': {'allOf': [default, {'not': {'required': ['is_inventory_available']}}]}, 'then': {'required': ['quantity']}}}}}
+        color_item = {'type': 'object', 'required': ['language_tag'], 'additionalProperties': False, 'properties': {
+            'standardized_values': {'type': 'array', 'minItems': 1, 'maxItems': 1, 'items': {'type': 'string', 'anyOf': [{'type': 'string'}, {'type': 'string', 'enum': ['Beige', 'Black'], 'enumNames': ['Beige', 'Black']}]}},
+            'value': {'type': 'string', 'maxLength': 1000}, 'language_tag': {'$ref': '#/$defs/language_tag'}, 'marketplace_id': {'$ref': '#/$defs/marketplace_id'}}}
+        return {'$defs': defs, 'type': 'object', 'required': ['item_name'], 'properties': {
+            'item_name': {'type': 'array', 'minItems': 1, 'maxItems': 1, 'items': {'type': 'object', 'required': ['value'], 'additionalProperties': False, 'properties': {
+                'value': {'type': 'string'}, 'language_tag': {'$ref': '#/$defs/language_tag'}, 'marketplace_id': {'$ref': '#/$defs/marketplace_id'}}}},
+            'fulfillment_availability': {'type': 'array', 'minItems': 1, 'maxItems': 1, 'items': stock_item},
+            'merchant_release_date': {'type': 'array', 'minItems': 1, 'maxItems': 1, 'items': {'type': 'object', 'required': ['value'], 'additionalProperties': False, 'properties': {
+                'value': dated, 'marketplace_id': {'$ref': '#/$defs/marketplace_id'}}}},
+            'color': {'type': 'array', 'minItems': 1, 'maxItems': 1, 'items': color_item}},
+            'allOf': [first, second, {'if': {'required': ['color']}, 'then': {'required': ['item_name']}}]}
+
+    def test_repeated_attribute_conditions_dates_and_value_lists_become_columns(self):
+        fields, _ = schema_utils.compile_fields(self.schema(), MARKET)
+        by = keyed(fields)
+        self.assertFalse([f['key'] for f in fields if f['value_type'] == 'json'])
+        self.assertIn('fulfillment_availability#1.quantity', by)
+        date = by['merchant_release_date' + SELECT + '#1.value']
+        self.assertEqual((date['value_type'], date['format']), ('string', ['date', 'date-time']))
+        self.assertIn('2026-11-20', date['description'])
+        family = by['color[language_tag=en_AE]' + SELECT + '#1.standardized_values']
+        self.assertEqual((family['suggestions'], family['list_max']), (['Beige', 'Black'], 1))
+
+    def test_both_copies_of_a_repeated_condition_still_apply(self):
+        schema = self.schema()
+        item = schema_utils.Resolver(schema).resolve(schema)['properties']['fulfillment_availability']['items']
+        self.assertNotIn('if', item)
+        self.assertEqual(len([c for c in item['allOf'] if 'if' in c]), 2)
+
+    def test_value_list_column_converts_to_a_list(self):
+        schema = self.schema()
+        fields, _ = schema_utils.compile_fields(schema, MARKET)
+        for f in fields:f['generated_format'] = schema_utils.GENERATED_FORMAT
+        values = {'item_name[language_tag=en_AE]' + SELECT + '#1.value': 'Foundation',
+                  'color[language_tag=en_AE]' + SELECT + '#1.value': 'Warm Beige',
+                  'color[language_tag=en_AE]' + SELECT + '#1.standardized_values': 'beige',
+                  'fulfillment_availability#1.fulfillment_channel_code': 'DEFAULT', 'fulfillment_availability#1.quantity': '12',
+                  'merchant_release_date' + SELECT + '#1.value': '2026-12-01'}
+        attributes = listings.convert(values, fields, MARKET, schema)[1]
+        self.assertEqual(attributes['color'], [{'language_tag': 'en_AE', 'marketplace_id': MARKET, 'value': 'Warm Beige', 'standardized_values': ['Beige']}])
+        self.assertEqual(attributes['fulfillment_availability'], [{'fulfillment_channel_code': 'DEFAULT', 'quantity': 12}])
+        self.assertEqual(attributes['merchant_release_date'], [{'marketplace_id': MARKET, 'value': '2026-12-01'}])
+        values['color[language_tag=en_AE]' + SELECT + '#1.standardized_values'] = 'Beige; Black'
+        with self.assertRaisesRegex(ValueError, '最多填 1 个值'):
+            listings.convert(values, fields, MARKET, schema)
