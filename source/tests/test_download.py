@@ -15,10 +15,11 @@ class DownloadTests(unittest.TestCase):
             ids=[]
             for category in ['行李箱','手机壳']:
                 row=library.run(SimpleNamespace(command='add',library=str(root),source=str(source),shop='测试店',marketplace='AE',category=category,version='v1'));ids.append(row['id'])
-            data,name=library.download_templates(root,ids[:1]);self.assertEqual(data,raw);self.assertEqual(name,'上传表格_测试店_AE.xlsm')
+            data,name=library.download_templates(root,ids[:1]);self.assertEqual(data,raw);self.assertEqual(name,'上传表格_测试店_AE_行李箱.xlsm')
             data,name=library.download_templates(root,ids);self.assertTrue(name.endswith('.zip'))
             with zipfile.ZipFile(io.BytesIO(data)) as z:
-                self.assertEqual(len(set(z.namelist())),2)
+                # Each table carries its category, so several downloads are told apart by name.
+                self.assertEqual(z.namelist(),['上传表格_测试店_AE_行李箱.xlsm','上传表格_测试店_AE_手机壳.xlsm'])
                 for file in z.namelist():self.assertEqual(z.read(file),raw)
             with self.assertRaisesRegex(ValueError,'已经|已被删除'):library.download_templates(root,[ids[0],'missing'])
             with self.assertRaisesRegex(ValueError,'不同表格'):library.download_templates(root,[ids[0],ids[0]])

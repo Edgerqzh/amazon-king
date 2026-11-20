@@ -122,10 +122,10 @@ class MultiProductTypeTests(unittest.TestCase):
         ids=[]
         for version in ['v1','v2']:
             row=library.run(SimpleNamespace(command='add',library=str(self.root),source=str(source),shop='甲店',marketplace='AE',category='多商品类型模板',version=version));ids.append(row['id'])
-        single,name=library.download_templates(self.root,ids[:1]);self.assertEqual(name,'上传表格_甲店_AE.xlsm');self.assertEqual(single,raw)
+        single,name=library.download_templates(self.root,ids[:1]);self.assertEqual(name,'上传表格_甲店_AE_多商品类型模板.xlsm');self.assertEqual(single,raw)
         data,_=library.download_templates(self.root,ids)
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            self.assertEqual(z.namelist(),['上传表格_甲店_AE.xlsm','上传表格_甲店_AE_2.xlsm'])
+            self.assertEqual(z.namelist(),['上传表格_甲店_AE_多商品类型模板.xlsm','上传表格_甲店_AE_多商品类型模板_2.xlsm'])
             for n in z.namelist():self.assertEqual(z.read(n),raw)
 
     def test_declarations_are_indexed_once_and_repeated_categories_reuse_search(self):

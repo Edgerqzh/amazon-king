@@ -179,18 +179,20 @@ def delete_template(root, ident):
     return {**result,'id':ident,'filename':result['filenames'][0]}
 
 
-def template_filename(shop, marketplace, table_type, suffix):
+def template_filename(shop, marketplace, table_type, suffix, category=''):
     table_type = validate_table_type(table_type)
     if suffix.lower() not in ('.xlsx', '.xlsm'):
         raise ValueError('表格文件扩展名无效')
     shop = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', shop).strip(' .')[:80] or '未命名店铺'
     marketplace = re.sub(r'[^A-Z0-9_-]', '_', marketplace.upper())[:12] or '未知地区'
-    return TABLE_TYPES[table_type]+'_'+shop+'_'+marketplace+suffix.lower()
+    # The category tells several downloaded tables apart (上传表格_店铺_AE_彩妆.xlsx), instead of "(1)", "(2)".
+    category = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', str(category or '')).strip(' ._')[:40] if category else ''
+    return TABLE_TYPES[table_type]+'_'+shop+'_'+marketplace+('_'+category if category else '')+suffix.lower()
 
 
 def download_filename(row):
     row = dict(row)
-    return template_filename(row.get('shop', GLOBAL_SHOP), row['marketplace'], row.get('table_type', 'upload'), Path(row['file']).suffix)
+    return template_filename(row.get('shop', GLOBAL_SHOP), row['marketplace'], row.get('table_type', 'upload'), Path(row['file']).suffix, row.get('category', ''))
 
 
 def unique_filename(name, used):
